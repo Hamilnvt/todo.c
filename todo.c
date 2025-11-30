@@ -1,7 +1,5 @@
 // TODO:
 // - add tags to group todos
-// - maybe remove support for # priority
-// - replace DEFAULT_TODO_PATH everywhere with the more user specific todo_path
 // - right now some todos are removed and I don't know why
 // - remove/complete todo should be in a bigger loop
 // - bound check complete/remove/modify index
@@ -17,7 +15,13 @@
 #define DEFAULT_TODO_PATH "/home/mathieu/todos/all.td"
 static char *todo_path = DEFAULT_TODO_PATH;
 #define TMP_TODO_FILENAME "/tmp/todo_tmp_s395n8a697w3b87v8r" 
-#define PRIORITY_STR "Priority: "
+#define PRIORITY_STR "priority: "
+#define COMPLETED_STR "completed"
+#define DIVIDER_STR "----------"
+#define DIVIDER_STR_WITH_NL DIVIDER_STR"\n"
+static bool flag_all = false;
+
+static inline bool streq(const char *s1, const char *s2) { return strcmp(s1, s2) == 0; }
 
 typedef struct
 {
@@ -25,6 +29,8 @@ typedef struct
     size_t count;
     size_t capacity;
 } AoS;
+static AoS args = {0};
+static AoS flags = {0};
 
 typedef struct
 {
@@ -35,11 +41,12 @@ typedef struct
 
 void todo_print(Todo t, FILE *sink)
 {
-    if (t.completed) fprintf(sink, "~");
-    else for (size_t i = 0; i < t.priority; i++) fprintf(sink, "#");
+    if (t.completed) fprintf(sink, "completed");
+    fprintf(sink, PRIORITY_STR "%zu\n", t.priority);
+    fprintf(sink, DIVIDER_STR_WITH_NL);
+    fprintf(sink, "%s", t.body);
+    fprintf(sink, DIVIDER_STR_WITH_NL);
     fprintf(sink, "\n");
-    fprintf(sink, "%s\n", t.body);
-    fprintf(sink, "%%%%\n\n\n");
 }
 
 static int compare_todos_descending_priority(const void *p1, const void *p2)
@@ -80,71 +87,96 @@ void skip_line(char **text)
     if (**text) *text += 1;
 }
 
-static bool flag_all = false;
+bool parse_todo(char **content, Todo *todo)
+{
+    char *it = *content;
+    if (!*it) return false;
+    while (isspace(*it)) it++;
+    if (!*it) return false;
+    if (strncmp(it, COMPLETED_STR, strlen(COMPLETED_STR)) == 0) {
+        *todo = (Todo){0};    
+        todo->completed = true;
+        it += strlen(COMPLETED_STR);
+        while (*it != '\n') {
+            if (!isspace(*it)) {
+                printf("ERROR: unexpected character `%c` on the completed line, did you touch something in this file? Because you shouldn't\n", *it);
+                printf("NOTE: Use the add command.\n");
+                return false;
+            }
+            it++;
+        }
+    }
+    if (!*it) {
+        printf("ERROR: reached end of file while parsing todo\n");
+        return false;
+    }
+    if (strncmp(it, PRIORITY_STR, strlen(PRIORITY_STR)) == 0) {
+        if (!todo->completed) *todo = (Todo){0};
+        it += strlen(PRIORITY_STR);
+        char *end = it;
+        long priority = strtol(it, &end, 10);
+        if (priority <= 0) {
+            *end = '\0';
+            printf("ERROR: priority should be a positive integer greater than zero, you wrote `%s`\n", it);
+            return false;
+        }
+        todo->priority = priority;
+        it = end;
+        while (*it != '\n') {
+            if (!isspace(*it)) {
+                printf("ERROR: unexpected character `%c` on the priority line, did you touch something in this file? Because you shouldn't\n", *it);
+                printf("NOTE: Insert a newline and start writing your todo\n");
+                return false;
+            }
+            it++;
+        }
+        it++;
+    }
+    if (!*it) {
+        printf("ERROR: reached end of file while parsing todo\n");
+        return false;
+    }
+    if (strncmp(it, DIVIDER_STR_WITH_NL, strlen(DIVIDER_STR_WITH_NL)) != 0) {
+        printf("ERROR: todo content should begin with `" DIVIDER_STR "`\n");
+        return false;
+    } else it += strlen(DIVIDER_STR_WITH_NL);
+    if (!*it) {
+        printf("ERROR: reached end of file while parsing todo\n");
+        return false;
+    }
+    char *begin = it;
+    size_t todolen = 0;
+    bool done = false;
+    while (*it) {
+        if (strncmp(it, DIVIDER_STR_WITH_NL, strlen(DIVIDER_STR_WITH_NL)) == 0) {
+            it += strlen(DIVIDER_STR_WITH_NL);
+            done = true;
+            break;
+        }
+        todolen++;
+        it++;
+    }
+    if (!done) {
+        printf("ERROR: todo content should end with `" DIVIDER_STR "`\n");
+        return false;
+    }
+    *content = it;
+    todo->body = malloc(todolen+1);
+    strncpy(todo->body, begin, todolen);
+    todo->body[todolen] = '\0';
+    return true;
+}
+
 bool parse_todos(char *content, Todos *todos)
 {
     da_clear(todos);
     Todo todo;
 
-    char *begin = content;
-    char *it    = content;
-    bool in_todo;
-    while (*it != '\0') {
-        if (!in_todo) {
-            if (isspace(*it)) {
-                it++;
-                continue;
-            } else if (*it == '#' || *it == '~') {
-                in_todo = true;
-                todo = (Todo){0};
-                if (*it == '#') {
-                    todo.priority = 1;
-                    it++;
-                    while (*it == '#') {
-                        todo.priority++;
-                        it++;
-                    }
-                } else {
-                    todo.completed = true;
-                    it++;
-                }
-                while (*it != '\n') {
-                    if (!isspace(*it)) {
-                        printf("ERROR: unexpected character `%c` on the priority line, did you touch something in this file? Because you shouldn't\n", *it);
-                        printf("NOTE: Insert a newline and start writing your todo\n");
-                        return false;
-                    }
-                    it++;
-                }
-                it++;
-                begin = it;
-            }
-        } else {
-            size_t todolen = 0;
-            while (*it) {
-                if (*it == '%') {
-                    if (!*(it+1)) {
-                        printf("ERROR: unexpected %% at the end of file, need %%%%\n");
-                        return false;
-                    }
-                    if (*(it+1) == '%') {
-                        in_todo = false;
-                        it += 2;
-                        break;
-                    }
-                }
-                todolen++;
-                it++;
-            }
-            todo.body = malloc(todolen+1);
-            strncpy(todo.body, begin, todolen);
-            todo.body[todolen] = '\0';
-            da_push(todos, todo);
-        }
-
-        it++;
+    char *it = content;
+    while (*it) {
+        if (!parse_todo(&it, &todo)) return false;
+        da_push(todos, todo);
     }
-    da_fit(todos);
     return true;
 }
 
@@ -172,14 +204,14 @@ bool is_valid_todo_path(char *path)
     bool is_todo_path = false;
     char *point = NULL;
     if ((point = strrchr(path, '.'))) {
-        if (strcmp(point, ".td") == 0) {
+        if (streq(point, ".td")) {
             is_todo_path = true;
         }
     }
     return is_valid_path && is_todo_path;
 }
 
-bool get_all_todos_at(char *todo_path, Todos *todos)
+bool get_all_todos(Todos *todos)
 {
     da_clear(todos);
     if (!is_valid_todo_path(todo_path)) {
@@ -200,10 +232,10 @@ bool get_all_todos_at(char *todo_path, Todos *todos)
     return true;
 }
 
-bool print_ordered_todos()
+bool command_show()
 {
     Todos todos = {0};
-    if (!get_all_todos_at(todo_path, &todos)) return false;
+    if (!get_all_todos(&todos)) return false;
     for (size_t i = 0; i < todos.count; i++) {
         Todo t = todos.items[i];
         if (!t.completed || flag_all)
@@ -215,26 +247,22 @@ bool print_ordered_todos()
 // TODO: make the user choose the file
 bool add_todo_to_file(Todo todo)
 {
-    FILE *f = fopen(DEFAULT_TODO_PATH, "a");
+    FILE *f = fopen(todo_path, "a");
     if (!f) {
-        printf("ERROR: could not open todo file at `%s`\n", DEFAULT_TODO_PATH);
+        printf("ERROR: could not open todo file at `%s`\n", todo_path);
         return false;
     }
-    fprintf(f, "\n");
-    for (size_t i = 0; i < todo.priority; i++)
-        fprintf(f, "#");
-    fprintf(f, "\n");
-    fprintf(f, "%s", todo.body);
-    fprintf(f, "\n%%%%");
+    todo_print(todo, f);
     fclose(f);
-    printf("INFO: todo added at `%s`\n", DEFAULT_TODO_PATH);
+    printf("INFO: todo added at `%s`\n", todo_path);
+    printf("DEBUG: content:\n`%s`\n", todo.body);
     return true;
 }
 
+// TODO: use parse_todo here
 bool add_or_modify_todo(Todo *todo)
 {
     bool modify = !!todo;
-    printf("Modify? %s\n", modify ? "true" : "false");
     FILE *f = fopen(TMP_TODO_FILENAME, "w");
     if (!f) {
         printf("ERROR: Could not create temporary file in /tmp\n"); 
@@ -243,8 +271,9 @@ bool add_or_modify_todo(Todo *todo)
         fprintf(f, PRIORITY_STR);
         if (modify) fprintf(f, "%zu", todo->priority);
         fprintf(f, "\n");
-        fprintf(f, "--------------------------------------------------\n");
+        fprintf(f, DIVIDER_STR_WITH_NL);
         if (modify) fprintf(f, todo->body);
+        fprintf(f, DIVIDER_STR_WITH_NL);
         // TODO: right now if you modify a completed todo it will be marked as not completed
         fclose(f);
     }
@@ -274,30 +303,25 @@ bool add_or_modify_todo(Todo *todo)
     *end = '\0';
     if (strlen(content) == 0) {
         printf("ERROR: you didn't specify the priority.\n");
-        printf("NOTE: priority is a positive integer or a sequence of '#'s.\n");
+        printf("NOTE: priority is a positive integer greater than zero.\n");
         printf("NOTE: here's the text you inserted\n");
         content = end+1;
         while (*content != '\n') content++;
         content++;
-        printf("~~~\n%s\n~~~\n", content);
+        printf(DIVIDER_STR_WITH_NL "%s\n" DIVIDER_STR_WITH_NL, content);
         return false;
     }
     size_t priority = 0;
     if (isdigit(*content)) {
         priority = atoi(content);
-    } else if (*content == '#') {
-        while (*content == '#') {
-            priority++;
-            content++;
-        }
         //TODO: check if line is not empty
     } else {
         printf("ERROR: unknown priority format `%s`.\n", content);
-        printf("NOTE: priority is a positive integer or a sequence of '#'s.\n");
+        printf("NOTE: priority is a positive integer.\n");
         printf("NOTE: here's the text you inserted\n");
         content = end+1;
         skip_line(&content);
-        printf("~~~\n%s\n~~~\n", content);
+        printf(DIVIDER_STR_WITH_NL "%s\n" DIVIDER_STR_WITH_NL, content);
         return false;
     }
 
@@ -314,13 +338,13 @@ bool add_or_modify_todo(Todo *todo)
     }
 }
 
-static inline bool command_add_todo(void) { return add_or_modify_todo(NULL); }
+static inline bool command_add(void) { return add_or_modify_todo(NULL); }
 static inline bool modify_todo(Todo *todo) { return add_or_modify_todo(todo); }
 
-bool command_modify_todo()
+bool command_modify()
 {
     Todos todos = {0};
-    if (!get_all_todos_at(DEFAULT_TODO_PATH, &todos)) return false;
+    if (!get_all_todos(&todos)) return false;
     int n = 1;
     for (size_t i = 0; i < todos.count; i++) {
         Todo t = todos.items[i];
@@ -331,12 +355,12 @@ bool command_modify_todo()
     }
 
     int index = 0;
-    printf("Insert the number of the todo that you'd want to modify (or insert `quit`)\n");
+    printf("Insert the number of the todo that you want to modify (or insert `quit`)\n");
     while (index <= 0) {
         char buffer[16] = {0};
         read(STDIN_FILENO, buffer, sizeof(buffer));; 
         buffer[strlen(buffer)-1] = '\0';
-        if (strcmp(buffer, "quit") == 0)
+        if (streq(buffer, "quit"))
             return false;
         index = atoi(buffer);
         printf("index: %d\n", index);
@@ -353,9 +377,9 @@ bool command_modify_todo()
             break;
         } else n++;
     }
-    FILE *f = fopen(DEFAULT_TODO_PATH, "w");
+    FILE *f = fopen(todo_path, "w");
     if (!f) {
-        printf("ERROR: could not open `%s`\n", DEFAULT_TODO_PATH);
+        printf("ERROR: could not open `%s`\n", todo_path);
         return false;
     }
     for (size_t i = 0; i < todos.count; i++) {
@@ -366,10 +390,10 @@ bool command_modify_todo()
     return true;
 }
 
-bool command_complete_todo()
+bool command_complete()
 {
     Todos todos = {0};
-    if (!get_all_todos_at(DEFAULT_TODO_PATH, &todos)) return false;
+    if (!get_all_todos(&todos)) return false;
     int n = 1;
     for (size_t i = 0; i < todos.count; i++) {
         Todo t = todos.items[i];
@@ -380,12 +404,12 @@ bool command_complete_todo()
     }
 
     int index = 0;
-    printf("Insert the number of the todo that you'd want to complete (or insert `quit`)\n");
+    printf("Insert the number of the todo that you want to complete (or insert `quit`)\n");
     while (index <= 0) {
         char buffer[16] = {0};
         read(STDIN_FILENO, buffer, sizeof(buffer));; 
         buffer[strlen(buffer)-1] = '\0';
-        if (strcmp(buffer, "quit") == 0)
+        if (streq(buffer, "quit"))
             return false;
         index = atoi(buffer);
         printf("index: %d\n", index);
@@ -402,9 +426,9 @@ bool command_complete_todo()
             break;
         } else n++;
     }
-    FILE *f = fopen(DEFAULT_TODO_PATH, "w");
+    FILE *f = fopen(todo_path, "w");
     if (!f) {
-        printf("ERROR: could not open `%s`\n", DEFAULT_TODO_PATH);
+        printf("ERROR: could not open `%s`\n", todo_path);
         return false;
     }
     for (size_t i = 0; i < todos.count; i++) {
@@ -415,10 +439,10 @@ bool command_complete_todo()
     return true;
 }
 
-bool command_remove_todo()
+bool command_remove()
 {
     Todos todos = {0};
-    if (!get_all_todos_at(DEFAULT_TODO_PATH, &todos)) return false;
+    if (!get_all_todos(&todos)) return false;
     for (size_t i = 0; i < todos.count; i++) {
         Todo t = todos.items[i];
         printf("%zu.\n", i+1);
@@ -426,12 +450,12 @@ bool command_remove_todo()
     }
 
     int index = 0;
-    printf("Insert the number of the todo that you'd want to remove (or insert `quit`)\n");
+    printf("Insert the number of the todo that you want to remove (or insert `quit`)\n");
     while (index <= 0) {
         char buffer[16] = {0};
         read(STDIN_FILENO, buffer, sizeof(buffer));; 
         buffer[strlen(buffer)-1] = '\0';
-        if (strcmp(buffer, "quit") == 0)
+        if (streq(buffer, "quit"))
             return false;
         index = atoi(buffer);
         printf("index: %d\n", index);
@@ -441,9 +465,9 @@ bool command_remove_todo()
 
     Todo t; (void)t;
     da_remove(&todos, index-1, t);
-    FILE *f = fopen(DEFAULT_TODO_PATH, "w");
+    FILE *f = fopen(todo_path, "w");
     if (!f) {
-        printf("ERROR: could not open `%s`\n", DEFAULT_TODO_PATH);
+        printf("ERROR: could not open `%s`\n", todo_path);
         return false;
     }
     for (size_t i = 0; i < todos.count; i++) {
@@ -454,11 +478,30 @@ bool command_remove_todo()
     return true;
 }
 
+typedef enum
+{
+    CMD_SHOW,
+    CMD_ADD,
+    CMD_COMPLETE,
+    CMD_REMOVE,
+    CMD_MODIFY,
+    CMD_UNKNOWN,
+    CMDS_COUNT
+} Command;
+
+Command get_command(char *str)
+{
+         if (streq(str, "show"))     return CMD_SHOW;
+    else if (streq(str, "add"))      return CMD_ADD;
+    else if (streq(str, "complete")) return CMD_COMPLETE;
+    else if (streq(str, "remove"))   return CMD_REMOVE;
+    else if (streq(str, "modify"))   return CMD_MODIFY;
+    else                             return CMD_UNKNOWN;
+}
+
 int main(int argc, char **argv)
 {
     program_name = argv[0];
-    AoS args = {0};
-    AoS flags = {0};
 
     for (int i = 1; i < argc; i++) {
         char *arg = argv[i];
@@ -472,8 +515,8 @@ int main(int argc, char **argv)
 
     for (size_t i = 0; i < flags.count; i++) {
         char *flag = flags.items[i];
-        if (strcmp(flag, "all") == 0) flag_all = true;    
-        else if (strcmp(flag, "help") == 0 || strcmp(flag, "h") == 0) {
+        if (streq(flag, "all")) flag_all = true;    
+        else if (streq(flag, "help") || streq(flag, "h")) {
             info();
             return 0;
         } else {
@@ -484,29 +527,29 @@ int main(int argc, char **argv)
     }
 
     char *first_arg = NULL;
-    char *command = NULL;
-    if (args.count == 0) command = "show";
+    Command command = CMD_UNKNOWN;
+    if (args.count == 0) command = CMD_SHOW;
     else {
         first_arg = args.items[0];
         if (is_valid_todo_path(first_arg)) {
-            command = "show";
+            command = CMD_SHOW;
             todo_path = first_arg;
-        } else command = first_arg;
+        } else command = get_command(first_arg);
     }
 
-    if (strcmp(command, "show") == 0) {
-        if (!print_ordered_todos()) return 1;
-    } else if (strcmp(command, "add") == 0) {
-        if (!command_add_todo()) return 1;
-    } else if (strcmp(command, "complete") == 0) {
-        if (!command_complete_todo()) return 1;
-    } else if (strcmp(command, "remove") == 0) {
-        if (!command_remove_todo()) return 1;
-    } else if (strcmp(command, "modify") == 0) {
-        if (!command_modify_todo()) return 1;
-    } else {
-        printf("ERROR: `%s` is not a todo path nor a valid command \n", first_arg);
-        return 1;
+    static_assert(CMDS_COUNT == 6, "Switch all commands");
+    switch (command)
+    {
+        case CMD_SHOW:     if (!command_show())   return 1; break;
+        case CMD_ADD:      if (!command_add())      return 1; break; 
+        case CMD_COMPLETE: if (!command_complete()) return 1; break;
+        case CMD_REMOVE:   if (!command_remove())   return 1; break;
+        case CMD_MODIFY:   if (!command_modify())   return 1; break;
+        case CMD_UNKNOWN:
+        default:
+            printf("ERROR: `%s` is not a todo path nor a valid command \n", first_arg);
+            return 1;
     }
+
     return 0;
 }
