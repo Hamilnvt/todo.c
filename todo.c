@@ -12,6 +12,12 @@
 
 #include "/home/mathieu/Coding/C/libs/dynamic_arrays.h"
 
+#define return_defer(value) \
+    do {                    \
+        result = (value);   \
+        goto defer;         \
+    } while (0)
+
 #define DEFAULT_TODO_PATH "/home/mathieu/todos/all.td"
 static char *todo_path = DEFAULT_TODO_PATH;
 #define TMP_TODO_FILENAME "/tmp/todo_tmp_s395n8a697w3b87v8r" 
@@ -41,7 +47,7 @@ typedef struct
 
 void todo_print(Todo t, FILE *sink)
 {
-    if (t.completed) fprintf(sink, "completed");
+    if (t.completed) fprintf(sink, COMPLETED_STR"\n");
     fprintf(sink, PRIORITY_STR "%zu\n", t.priority);
     fprintf(sink, DIVIDER_STR_WITH_NL);
     fprintf(sink, "%s", t.body);
@@ -89,44 +95,20 @@ void skip_line(char **text)
 
 bool parse_todo(char **content, Todo *todo)
 {
+    if (!content || !*content) return false;
+
+    bool result = true;
+
+    *todo = (Todo){0};
     char *it = *content;
-    if (!*it) return false;
-    while (isspace(*it)) it++;
-    if (!*it) return false;
     if (strncmp(it, COMPLETED_STR, strlen(COMPLETED_STR)) == 0) {
-        *todo = (Todo){0};    
         todo->completed = true;
         it += strlen(COMPLETED_STR);
         while (*it != '\n') {
             if (!isspace(*it)) {
                 printf("ERROR: unexpected character `%c` on the completed line, did you touch something in this file? Because you shouldn't\n", *it);
-                printf("NOTE: Use the add command.\n");
-                return false;
-            }
-            it++;
-        }
-    }
-    if (!*it) {
-        printf("ERROR: reached end of file while parsing todo\n");
-        return false;
-    }
-    if (strncmp(it, PRIORITY_STR, strlen(PRIORITY_STR)) == 0) {
-        if (!todo->completed) *todo = (Todo){0};
-        it += strlen(PRIORITY_STR);
-        char *end = it;
-        long priority = strtol(it, &end, 10);
-        if (priority <= 0) {
-            *end = '\0';
-            printf("ERROR: priority should be a positive integer greater than zero, you wrote `%s`\n", it);
-            return false;
-        }
-        todo->priority = priority;
-        it = end;
-        while (*it != '\n') {
-            if (!isspace(*it)) {
-                printf("ERROR: unexpected character `%c` on the priority line, did you touch something in this file? Because you shouldn't\n", *it);
-                printf("NOTE: Insert a newline and start writing your todo\n");
-                return false;
+                printf("NOTE: Use the commands.\n"); // TODO say to use help flag
+                return_defer(false);
             }
             it++;
         }
@@ -134,15 +116,41 @@ bool parse_todo(char **content, Todo *todo)
     }
     if (!*it) {
         printf("ERROR: reached end of file while parsing todo\n");
-        return false;
+        return_defer(false);
+    }
+    if (strncmp(it, PRIORITY_STR, strlen(PRIORITY_STR)) == 0) {
+        it += strlen(PRIORITY_STR);
+        char *end = it;
+        long priority = strtol(it, &end, 10);
+        if (priority <= 0) {
+            *end = '\0';
+            printf("ERROR: priority should be a positive integer greater than zero, you wrote `%s`\n", it);
+            return_defer(false);
+        }
+        todo->priority = priority;
+        it = end;
+        while (*it != '\n') {
+            if (!isspace(*it)) {
+                printf("ERROR: unexpected character `%c` on the priority line, did you touch something in this file? Because you shouldn't\n", *it);
+                printf("NOTE: Clear the line, insert a newline and start writing your todo\n");
+                // NOTE: you wrote...
+                return_defer(false);
+            }
+            it++;
+        }
+        it++;
+    }
+    if (!*it) {
+        printf("ERROR: reached end of file while parsing todo\n");
+        return_defer(false);
     }
     if (strncmp(it, DIVIDER_STR_WITH_NL, strlen(DIVIDER_STR_WITH_NL)) != 0) {
         printf("ERROR: todo content should begin with `" DIVIDER_STR "`\n");
-        return false;
+        return_defer(false);
     } else it += strlen(DIVIDER_STR_WITH_NL);
     if (!*it) {
         printf("ERROR: reached end of file while parsing todo\n");
-        return false;
+        return_defer(false);
     }
     char *begin = it;
     size_t todolen = 0;
@@ -158,24 +166,31 @@ bool parse_todo(char **content, Todo *todo)
     }
     if (!done) {
         printf("ERROR: todo content should end with `" DIVIDER_STR "`\n");
-        return false;
+        return_defer(false);
     }
-    *content = it;
+
     todo->body = malloc(todolen+1);
     strncpy(todo->body, begin, todolen);
     todo->body[todolen] = '\0';
-    return true;
+
+defer:
+    *content = it;
+    return result;
 }
 
 bool parse_todos(char *content, Todos *todos)
 {
     da_clear(todos);
-    Todo todo;
 
     char *it = content;
+    bool res;
+    Todo todo;
+    while (isspace(*it)) it++;
     while (*it) {
-        if (!parse_todo(&it, &todo)) return false;
+        res = parse_todo(&it, &todo);
+        if (!res && *it) return false;
         da_push(todos, todo);
+        while (isspace(*it)) it++;
     }
     return true;
 }
@@ -183,7 +198,7 @@ bool parse_todos(char *content, Todos *todos)
 static char *program_name = NULL;
 void usage()
 {
-    // TODO
+    // TODO: commands and flags
     printf("usage: %s\n", program_name);
 }
 
@@ -215,6 +230,7 @@ bool get_all_todos(Todos *todos)
 {
     da_clear(todos);
     if (!is_valid_todo_path(todo_path)) {
+        // TODO maybe move the errors in is_valid_todo_path
         printf("ERROR: `%s` is not a valid todo path\n", todo_path);
         printf("NOTE: a todo path is an existing file with extension .td\n");
         printf("NOTE: If it's your first time you can add a todo via this command: %s add\n", program_name);
@@ -290,47 +306,59 @@ bool add_or_modify_todo(Todo *todo)
         printf("INFO: empty todos won't be added\n");
         return true;
     }
-    if (strncmp(content, PRIORITY_STR, strlen(PRIORITY_STR)) != 0) {
-        printf("ERROR: you may have modified the structure of the file, do it again.\n");
-        printf("NOTE: here's the text you inserted\n");
-        printf("%s\n", content);
-        return false;
-    }
-    content += strlen(PRIORITY_STR);
 
-    char *end = content;
-    while (*end != '\n') end++;
-    *end = '\0';
-    if (strlen(content) == 0) {
-        printf("ERROR: you didn't specify the priority.\n");
-        printf("NOTE: priority is a positive integer greater than zero.\n");
-        printf("NOTE: here's the text you inserted\n");
-        content = end+1;
-        while (*content != '\n') content++;
-        content++;
-        printf(DIVIDER_STR_WITH_NL "%s\n" DIVIDER_STR_WITH_NL, content);
-        return false;
-    }
-    size_t priority = 0;
-    if (isdigit(*content)) {
-        priority = atoi(content);
-        //TODO: check if line is not empty
-    } else {
-        printf("ERROR: unknown priority format `%s`.\n", content);
-        printf("NOTE: priority is a positive integer.\n");
-        printf("NOTE: here's the text you inserted\n");
-        content = end+1;
-        skip_line(&content);
-        printf(DIVIDER_STR_WITH_NL "%s\n" DIVIDER_STR_WITH_NL, content);
-        return false;
-    }
+    //if (strncmp(content, PRIORITY_STR, strlen(PRIORITY_STR)) != 0) {
+    //    printf("ERROR: you may have modified the structure of the file, do it again.\n");
+    //    printf("NOTE: here's the text you inserted\n");
+    //    printf("%s\n", content);
+    //    return false;
+    //}
+    //content += strlen(PRIORITY_STR);
 
-    content = end + 1;
-    skip_line(&content);
+    //char *end = content;
+    //while (*end != '\n') end++;
+    //*end = '\0';
+    //if (strlen(content) == 0) {
+    //    printf("ERROR: you didn't specify the priority.\n");
+    //    printf("NOTE: priority is a positive integer greater than zero.\n");
+    //    printf("NOTE: here's the text you inserted\n");
+    //    content = end+1;
+    //    while (*content != '\n') content++;
+    //    content++;
+    //    printf(DIVIDER_STR_WITH_NL "%s\n" DIVIDER_STR_WITH_NL, content);
+    //    return false;
+    //}
+    //size_t priority = 0;
+    //if (isdigit(*content)) {
+    //    priority = atoi(content);
+    //    //TODO: check if line is not empty
+    //} else {
+    //    printf("ERROR: unknown priority format `%s`.\n", content);
+    //    printf("NOTE: priority is a positive integer.\n");
+    //    printf("NOTE: here's the text you inserted\n");
+    //    content = end+1;
+    //    skip_line(&content);
+    //    printf(DIVIDER_STR_WITH_NL "%s\n" DIVIDER_STR_WITH_NL, content);
+    //    return false;
+    //}
+
+    //content = end + 1;
+    //skip_line(&content);
 
     Todo new_todo = {0};
-    new_todo.priority = priority;
-    new_todo.body = content;
+    //new_todo.priority = priority;
+    //new_todo.body = content;
+    if (!parse_todo(&content, &new_todo)) return false;
+
+    if (*content) {
+        printf("ERROR: You should not insert text after `" DIVIDER_STR "`\n");
+        printf("NOTE: You inserted\n`%s`\n", content);
+        printf("~~~~~~~~~~~~~~~~~~~~\n");
+        printf("NOTE: Todo priority:\n%zu\n", new_todo.priority);
+        printf("NOTE: Todo content:\n`%s`\n", new_todo.body);
+        return false;
+    }
+
     if (!modify) return add_todo_to_file(new_todo);
     else {
         *todo = new_todo;
