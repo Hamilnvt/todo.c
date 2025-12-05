@@ -1,6 +1,5 @@
 // TODO:
 // - add tags to group todos
-// - right now some todos are removed and I don't know why
 // - remove/complete todo should be in a bigger loop
 // - bound check complete/remove/modify index
 
@@ -18,6 +17,7 @@
         goto defer;         \
     } while (0)
 
+#define FILE_EXTENSION "td"
 #define DEFAULT_TODO_PATH "/home/mathieu/todos/all.td"
 static char *todo_path = DEFAULT_TODO_PATH;
 #define TMP_TODO_FILENAME "/tmp/todo_tmp_s395n8a697w3b87v8r" 
@@ -124,7 +124,11 @@ bool parse_todo(char **content, Todo *todo)
         long priority = strtol(it, &end, 10);
         if (priority <= 0) {
             *end = '\0';
-            printf("ERROR: priority should be a positive integer greater than zero, you wrote `%s`\n", it);
+            printf("ERROR: priority should be a positive integer greater than zero\n");
+            printf("NOTE: you inserted ");
+            if (strlen(it) > 0) printf("`%s`", it);
+            else printf("nothing");
+            printf("\n");
             return_defer(false);
         }
         todo->priority = priority;
@@ -208,40 +212,37 @@ void info()
     usage();
 }
 
-bool is_valid_todo_path(char *path)
+bool check_valid_todo_path(char *path)
 {
+    if (!path) return false;
+
     FILE *f = fopen(path, "r");
-    bool is_valid_path = false;
-    if (f) {
-        is_valid_path = true;
-        fclose(f);
+    if (!f) {
+        printf("ERROR: could not open file at `%s`\n", path);
+        return false;
+    } else fclose(f);
+
+    char *point = strrchr(path, '.');
+    bool got_extension = !!point;
+    point++;
+    got_extension |= streq(point, FILE_EXTENSION);
+    if (!got_extension) {
+        printf("ERROR: file `%s` has no extension `%s`\n", path, FILE_EXTENSION);
+        return false; 
     }
-    bool is_todo_path = false;
-    char *point = NULL;
-    if ((point = strrchr(path, '.'))) {
-        if (streq(point, ".td")) {
-            is_todo_path = true;
-        }
-    }
-    return is_valid_path && is_todo_path;
+
+    return true;
 }
 
 bool get_all_todos(Todos *todos)
 {
     da_clear(todos);
-    if (!is_valid_todo_path(todo_path)) {
-        // TODO maybe move the errors in is_valid_todo_path
-        printf("ERROR: `%s` is not a valid todo path\n", todo_path);
-        printf("NOTE: a todo path is an existing file with extension .td\n");
-        printf("NOTE: If it's your first time you can add a todo via this command: %s add\n", program_name);
-        return false;
-    }
     char *content = read_file(todo_path);
     if (!content) return false;
     if (!parse_todos(content, todos)) return false;
     if (todos->count == 0) {
-        printf("INFO: No todos found at `%s`\n", todo_path);
-        printf("NOTE: You can add one with this command: %s add\n", program_name);
+        printf("INFO: no todos found at `%s`\n", todo_path);
+        printf("NOTE: you can add one with this command: %s add\n", program_name);
         return false;
     }
     qsort(todos->items, todos->count, sizeof(todos->items[0]), compare_todos_descending_priority);
@@ -250,6 +251,11 @@ bool get_all_todos(Todos *todos)
 
 bool command_show()
 {
+    if (args.count > 1) {
+        // TODO report error too many arguments 
+        return false;
+    }
+
     Todos todos = {0};
     if (!get_all_todos(&todos)) return false;
     for (size_t i = 0; i < todos.count; i++) {
@@ -271,7 +277,6 @@ bool add_todo_to_file(Todo todo)
     todo_print(todo, f);
     fclose(f);
     printf("INFO: todo added at `%s`\n", todo_path);
-    printf("DEBUG: content:\n`%s`\n", todo.body);
     return true;
 }
 
@@ -366,11 +371,30 @@ bool add_or_modify_todo(Todo *todo)
     }
 }
 
-static inline bool command_add(void) { return add_or_modify_todo(NULL); }
+static inline bool command_add(void)
+{
+    if (args.count > 2) {
+        // TODO report error too many arguments
+        return false;
+    } else if (args.count == 2) {
+        if (!check_valid_todo_path(args.items[1])) return false;
+        else todo_path = args.items[1];
+    }
+
+    return add_or_modify_todo(NULL);
+}
 static inline bool modify_todo(Todo *todo) { return add_or_modify_todo(todo); }
 
 bool command_modify()
 {
+    if (args.count > 2) {
+        // TODO report error too many arguments
+        return false;
+    } else if (args.count == 2) {
+        if (!check_valid_todo_path(args.items[1])) return false;
+        else todo_path = args.items[1];
+    }
+
     Todos todos = {0};
     if (!get_all_todos(&todos)) return false;
     int n = 1;
@@ -420,6 +444,14 @@ bool command_modify()
 
 bool command_complete()
 {
+    if (args.count > 2) {
+        // TODO report error too many arguments
+        return false;
+    } else if (args.count == 2) {
+        if (!check_valid_todo_path(args.items[1])) return false;
+        else todo_path = args.items[1];
+    }
+
     Todos todos = {0};
     if (!get_all_todos(&todos)) return false;
     int n = 1;
@@ -469,6 +501,14 @@ bool command_complete()
 
 bool command_remove()
 {
+    if (args.count > 2) {
+        // TODO report error too many arguments
+        return false;
+    } else if (args.count == 2) {
+        if (!check_valid_todo_path(args.items[1])) return false;
+        else todo_path = args.items[1];
+    }
+
     Todos todos = {0};
     if (!get_all_todos(&todos)) return false;
     for (size_t i = 0; i < todos.count; i++) {
@@ -509,14 +549,15 @@ bool command_remove()
 typedef enum
 {
     CMD_SHOW,
+    TODO_PATH,
     CMD_ADD,
     CMD_COMPLETE,
     CMD_REMOVE,
     CMD_MODIFY,
-    CMD_UNKNOWN,
     CMDS_COUNT
 } Command;
 
+static_assert(CMDS_COUNT == 6, "Get all commands from string in get_command");
 Command get_command(char *str)
 {
          if (streq(str, "show"))     return CMD_SHOW;
@@ -524,7 +565,7 @@ Command get_command(char *str)
     else if (streq(str, "complete")) return CMD_COMPLETE;
     else if (streq(str, "remove"))   return CMD_REMOVE;
     else if (streq(str, "modify"))   return CMD_MODIFY;
-    else                             return CMD_UNKNOWN;
+    else                             return TODO_PATH;
 }
 
 int main(int argc, char **argv)
@@ -554,29 +595,25 @@ int main(int argc, char **argv)
         }
     }
 
-    char *first_arg = NULL;
-    Command command = CMD_UNKNOWN;
-    if (args.count == 0) command = CMD_SHOW;
-    else {
-        first_arg = args.items[0];
-        if (is_valid_todo_path(first_arg)) {
-            command = CMD_SHOW;
-            todo_path = first_arg;
-        } else command = get_command(first_arg);
-    }
+    Command command = args.count > 0 ? get_command(args.items[0]) : CMD_SHOW;
 
     static_assert(CMDS_COUNT == 6, "Switch all commands");
     switch (command)
     {
-        case CMD_SHOW:     if (!command_show())   return 1; break;
+        case CMD_SHOW: if (!command_show()) return 1; break;
+        case TODO_PATH:
+        {
+            if (!check_valid_todo_path(args.items[0])) return 1;
+            todo_path = args.items[0];
+            command_show();
+        } break;
         case CMD_ADD:      if (!command_add())      return 1; break; 
         case CMD_COMPLETE: if (!command_complete()) return 1; break;
         case CMD_REMOVE:   if (!command_remove())   return 1; break;
         case CMD_MODIFY:   if (!command_modify())   return 1; break;
-        case CMD_UNKNOWN:
         default:
-            printf("ERROR: `%s` is not a todo path nor a valid command \n", first_arg);
-            return 1;
+            printf("Unreachable\n");
+            abort();
     }
 
     return 0;
