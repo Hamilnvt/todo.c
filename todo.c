@@ -1,7 +1,15 @@
 // TODO:
 // - add tags to group todos
-// - remove/complete todo should be in a bigger loop
-// - bound check complete/remove/modify index
+// - delete/complete todo should be in a bigger loop
+// - maybe remove command CMD_IS_PATH
+// - allow 'priority 0', omitting the PRIORITY_STR like the COMPLETED_STR is omitted if the todo is not completed
+//   > PRIORITY_STR can be something like "p=" or "p: "
+//   > COMPLETED_STR can be "c" or "done" or "ok"
+// - what if I wanted to uncomplete a todo?
+//   > introduce -all flag for complete/delete/modify commands
+//     - "completing" a completed todo makes it uncompleted (maybe with a warning and an input confirmation)
+//   > introduce -completed flag for delete command
+// - idea for a command: comments parser to detect and create todos from a file
 
 #include <stdio.h>
 #include <unistd.h>
@@ -21,13 +29,24 @@
 #define DEFAULT_TODO_PATH "/home/mathieu/todos/all.td"
 static char *todo_path = DEFAULT_TODO_PATH;
 #define TMP_TODO_FILENAME "/tmp/todo_tmp_s395n8a697w3b87v8r" 
-#define PRIORITY_STR "priority: "
-#define COMPLETED_STR "completed"
 #define DIVIDER_STR "----------"
 #define DIVIDER_STR_WITH_NL DIVIDER_STR"\n"
 static bool flag_all = false;
 
 static inline bool streq(const char *s1, const char *s2) { return strcmp(s1, s2) == 0; }
+static inline bool strneq(const char *s1, const char *s2, size_t n) { return strncmp(s1, s2, n) == 0; }
+
+typedef enum
+{
+    CMD_SHOW,
+    CMD_IS_PATH,
+    CMD_ADD,
+    CMD_COMPLETE,
+    CMD_DELETE,
+    CMD_MODIFY,
+    CMD_HELP,
+    CMDS_COUNT
+} Command;
 
 typedef struct
 {
@@ -38,6 +57,12 @@ typedef struct
 static AoS args = {0};
 static AoS flags = {0};
 
+void shift_args()
+{
+    args.items++;
+    args.count--;
+}
+
 typedef struct
 {
     char *body;
@@ -47,10 +72,14 @@ typedef struct
 
 void todo_print(Todo t, FILE *sink)
 {
-    if (t.completed) fprintf(sink, COMPLETED_STR"\n");
-    fprintf(sink, PRIORITY_STR "%zu\n", t.priority);
+    fprintf(sink, "[");
+    if (t.completed) fprintf(sink, "x");
+    fprintf(sink, "] ");
+    if (t.priority) fprintf(sink, "%zu", t.priority);
+    fprintf(sink, "\n");
+
     fprintf(sink, DIVIDER_STR_WITH_NL);
-    fprintf(sink, "%s", t.body);
+    fprintf(sink, "%s", t.body ? t.body : "\n");
     fprintf(sink, DIVIDER_STR_WITH_NL);
     fprintf(sink, "\n");
 }
@@ -86,11 +115,18 @@ char *read_file(char *path)
     return content;
 }
 
-void skip_line(char **text)
+void skip_line(char **str)
 {
-    while (**text && **text != '\n')
-        *text += 1;
-    if (**text) *text += 1;
+    if (!str || !*str) return;
+    while (**str && **str != '\n')
+        *str += 1;
+    if (**str) *str += 1;
+}
+
+static inline void trim_left(char **str)
+{
+    if (!str || !*str) return;
+    while (isblank(**str)) (*str)++;
 }
 
 bool parse_todo(char **content, Todo *todo)
@@ -101,49 +137,74 @@ bool parse_todo(char **content, Todo *todo)
 
     *todo = (Todo){0};
     char *it = *content;
-    if (strncmp(it, COMPLETED_STR, strlen(COMPLETED_STR)) == 0) {
-        todo->completed = true;
-        it += strlen(COMPLETED_STR);
-        while (*it != '\n') {
-            if (!isspace(*it)) {
-                printf("ERROR: unexpected character `%c` on the completed line, did you touch something in this file? Because you shouldn't\n", *it);
-                printf("NOTE: Use the commands.\n"); // TODO say to use help flag
-                return_defer(false);
-            }
-            it++;
-        }
-        it++;
-    }
+
+    trim_left(&it);
     if (!*it) {
         printf("ERROR: reached end of file while parsing todo\n");
         return_defer(false);
     }
-    if (strncmp(it, PRIORITY_STR, strlen(PRIORITY_STR)) == 0) {
-        it += strlen(PRIORITY_STR);
+    if (*it != '[') {
+        printf("ERROR: expecting '[' but got '%c'\n", *it);
+        return_defer(false);
+    } else it++;
+
+    trim_left(&it);
+    if (!*it) {
+        printf("ERROR: reached end of file while parsing todo\n");
+        return_defer(false);
+    }
+    if (*it == 'x') {
+        it++;
+        todo->completed = true;
+        trim_left(&it);
+        if (!*it) {
+            printf("ERROR: reached end of file while parsing todo\n");
+            return_defer(false);
+        }
+    }
+    if (*it != ']') {
+        printf("ERROR: expecting ']' but got '%c'\n", *it);
+        return_defer(false);
+    } else it++;
+
+    trim_left(&it);
+    if (!*it) {
+        printf("ERROR: reached end of file while parsing todo\n");
+        return_defer(false);
+    }
+    if (*it != '\n' && !isdigit(*it)) {
+        printf("ERROR: expecting the priority number or nothing, but got '%c'\n", *it);
+        return_defer(false);
+    }
+    if (isdigit(*it)) {
         char *end = it;
         long priority = strtol(it, &end, 10);
         if (priority <= 0) {
             *end = '\0';
             printf("ERROR: priority should be a positive integer greater than zero\n");
-            printf("NOTE: you inserted ");
-            if (strlen(it) > 0) printf("`%s`", it);
-            else printf("nothing");
-            printf("\n");
+            printf("NOTE: you inserted `%s`\n", it);
             return_defer(false);
         }
         todo->priority = priority;
         it = end;
-        while (*it != '\n') {
-            if (!isspace(*it)) {
-                printf("ERROR: unexpected character `%c` on the priority line, did you touch something in this file? Because you shouldn't\n", *it);
-                printf("NOTE: Clear the line, insert a newline and start writing your todo\n");
-                // NOTE: you wrote...
-                return_defer(false);
-            }
-            it++;
-        }
-        it++;
     }
+
+    trim_left(&it);
+    if (!*it) {
+        printf("ERROR: reached end of file while parsing todo\n");
+        return_defer(false);
+    }
+    if (*it == '@') {
+        printf("ERROR: tags are not yet supported\n");
+        return_defer(false);
+    }
+    //printf("`%s`", it);
+    if (*it != '\n') {
+        printf("ERROR: expecting new line but got '%c'\n", *it);
+        return_defer(false);
+    } else it++;
+
+    trim_left(&it);
     if (!*it) {
         printf("ERROR: reached end of file while parsing todo\n");
         return_defer(false);
@@ -156,6 +217,7 @@ bool parse_todo(char **content, Todo *todo)
         printf("ERROR: reached end of file while parsing todo\n");
         return_defer(false);
     }
+
     char *begin = it;
     size_t todolen = 0;
     bool done = false;
@@ -212,6 +274,88 @@ void info()
     usage();
 }
 
+void command_usage(Command cmd)
+{
+    static_assert(CMDS_COUNT == 7, "Switch all commands in command_usage");
+    switch (cmd)
+    {
+        case CMD_SHOW:
+        {
+            printf("Command show:\n");
+            printf("    info:\n        print pending todos in `path` to stdout\n");
+            printf("    usage:\n        todo [show] [path]\n");
+            printf("    flags:\n        -all                also print completed todos\n");
+        } break;
+        case CMD_IS_PATH:
+        {
+            printf("TODO: command_help for command that is a path\n");
+        } break;
+        case CMD_ADD:
+        {
+            printf("TODO: command_help for command add\n");
+        } break;
+        case CMD_COMPLETE:
+        {
+            printf("TODO: command_help for command complete\n");
+        } break;
+        case CMD_DELETE:
+        {
+            printf("TODO: command_help for command delete\n");
+        } break;
+        case CMD_MODIFY:
+        {
+            printf("TODO: command_help for command modify\n");
+        } break;
+        case CMD_HELP:
+        {
+            printf("TODO: command_help for command help\n");
+        } break;
+        default:
+            printf("Unreachable switching command in command_help\n");
+            abort();
+    }
+}
+
+static_assert(CMDS_COUNT == 7, "Get all commands from string in get_command");
+Command get_command(char *str)
+{
+         if (streq(str, "show"))                          return CMD_SHOW;
+    else if (streq(str, "add"))                           return CMD_ADD;
+    else if (streq(str, "complete") || streq(str, "com")) return CMD_COMPLETE;
+    else if (streq(str, "delete")   || streq(str, "del")) return CMD_DELETE;
+    else if (streq(str, "modify")   || streq(str, "mod")) return CMD_MODIFY;
+    else if (streq(str, "help"))                          return CMD_HELP;
+    else                                                  return CMD_IS_PATH;
+}
+
+bool command_help()
+{
+    bool flag_error = false;
+    for (size_t i = 0; i < flags.count; i++) {
+        char *flag = flags.items[i];
+        printf("ERROR: unknown flag `%s` for command help\n", flag);
+        printf("TODO: print command usage\n");
+        flag_error = true;
+    }
+    if (flag_error) return false;
+
+    if (args.count > 1) {
+        // TODO report error too many arguments 
+        return false;
+    } else if (args.count == 0) {
+        command_usage(CMD_HELP);
+    } else {
+        Command cmd = get_command(args.items[0]);
+        if (cmd == CMD_IS_PATH) {
+            printf("ERROR: unknown command  `%s`\n", args.items[0]);
+            return false;
+        }
+        command_usage(cmd);
+    }
+
+    return true;
+}
+
 bool check_valid_todo_path(char *path)
 {
     if (!path) return false;
@@ -251,9 +395,27 @@ bool get_all_todos(Todos *todos)
 
 bool command_show()
 {
+    bool flag_error = false;
+    for (size_t i = 0; i < flags.count; i++) {
+        char *flag = flags.items[i];
+        if (streq(flag, "all")) flag_all = true;    
+        else {
+            printf("ERROR: unknown flag `%s` for command show\n", flag);
+            printf("TODO: print command usage\n");
+            flag_error = true;
+        }
+    }
+    if (flag_error) return false;
+
     if (args.count > 1) {
         // TODO report error too many arguments 
         return false;
+    } else if (args.count == 1) {
+        if (!check_valid_todo_path(args.items[0])) return false;
+        else {
+            todo_path = args.items[0];
+            shift_args();
+        }
     }
 
     Todos todos = {0};
@@ -280,7 +442,6 @@ bool add_todo_to_file(Todo todo)
     return true;
 }
 
-// TODO: use parse_todo here
 bool add_or_modify_todo(Todo *todo)
 {
     bool modify = !!todo;
@@ -289,12 +450,9 @@ bool add_or_modify_todo(Todo *todo)
         printf("ERROR: Could not create temporary file in /tmp\n"); 
         return false;
     } else {
-        fprintf(f, PRIORITY_STR);
-        if (modify) fprintf(f, "%zu", todo->priority);
-        fprintf(f, "\n");
-        fprintf(f, DIVIDER_STR_WITH_NL);
-        if (modify) fprintf(f, todo->body);
-        fprintf(f, DIVIDER_STR_WITH_NL);
+        Todo template_todo = {0};
+        todo_print(template_todo, f);
+        fprintf(f, "Any text inserted after the line will be ignored\n");
         // TODO: right now if you modify a completed todo it will be marked as not completed
         fclose(f);
     }
@@ -307,61 +465,19 @@ bool add_or_modify_todo(Todo *todo)
         printf("ERROR: could not read temporary todo file at `%s`\n", TMP_TODO_FILENAME);
         return false;
     }
-    if (strlen(content) == 0) {
+
+    Todo new_todo = {0};
+    if (!parse_todo(&content, &new_todo)) return false;
+
+    if (strlen(new_todo.body) == 0) {
         printf("INFO: empty todos won't be added\n");
         return true;
     }
-
-    //if (strncmp(content, PRIORITY_STR, strlen(PRIORITY_STR)) != 0) {
-    //    printf("ERROR: you may have modified the structure of the file, do it again.\n");
-    //    printf("NOTE: here's the text you inserted\n");
-    //    printf("%s\n", content);
-    //    return false;
-    //}
-    //content += strlen(PRIORITY_STR);
-
-    //char *end = content;
-    //while (*end != '\n') end++;
-    //*end = '\0';
-    //if (strlen(content) == 0) {
-    //    printf("ERROR: you didn't specify the priority.\n");
-    //    printf("NOTE: priority is a positive integer greater than zero.\n");
-    //    printf("NOTE: here's the text you inserted\n");
-    //    content = end+1;
-    //    while (*content != '\n') content++;
-    //    content++;
-    //    printf(DIVIDER_STR_WITH_NL "%s\n" DIVIDER_STR_WITH_NL, content);
-    //    return false;
-    //}
-    //size_t priority = 0;
-    //if (isdigit(*content)) {
-    //    priority = atoi(content);
-    //    //TODO: check if line is not empty
-    //} else {
-    //    printf("ERROR: unknown priority format `%s`.\n", content);
-    //    printf("NOTE: priority is a positive integer.\n");
-    //    printf("NOTE: here's the text you inserted\n");
-    //    content = end+1;
-    //    skip_line(&content);
-    //    printf(DIVIDER_STR_WITH_NL "%s\n" DIVIDER_STR_WITH_NL, content);
-    //    return false;
-    //}
-
-    //content = end + 1;
-    //skip_line(&content);
-
-    Todo new_todo = {0};
-    //new_todo.priority = priority;
-    //new_todo.body = content;
-    if (!parse_todo(&content, &new_todo)) return false;
-
-    if (*content) {
-        printf("ERROR: You should not insert text after `" DIVIDER_STR "`\n");
-        printf("NOTE: You inserted\n`%s`\n", content);
-        printf("~~~~~~~~~~~~~~~~~~~~\n");
-        printf("NOTE: Todo priority:\n%zu\n", new_todo.priority);
-        printf("NOTE: Todo content:\n`%s`\n", new_todo.body);
-        return false;
+    char *tmp = new_todo.body;
+    while (isspace(*tmp)) tmp++;
+    if (!*tmp) {
+        printf("INFO: todos with empty lines or spaces only won't be added\n");
+        return true;
     }
 
     if (!modify) return add_todo_to_file(new_todo);
@@ -371,14 +487,23 @@ bool add_or_modify_todo(Todo *todo)
     }
 }
 
-static inline bool command_add(void)
+bool command_add(void)
 {
-    if (args.count > 2) {
+    bool flag_error = false;
+    for (size_t i = 0; i < flags.count; i++) {
+        char *flag = flags.items[i];
+        printf("ERROR: unknown flag `%s` for command add\n", flag);
+        printf("TODO: print command usage\n");
+        flag_error = true;
+    }
+    if (flag_error) return false;
+
+    if (args.count > 1) {
         // TODO report error too many arguments
         return false;
-    } else if (args.count == 2) {
-        if (!check_valid_todo_path(args.items[1])) return false;
-        else todo_path = args.items[1];
+    } else if (args.count == 1) {
+        if (!check_valid_todo_path(args.items[0])) return false;
+        else todo_path = args.items[0];
     }
 
     return add_or_modify_todo(NULL);
@@ -387,12 +512,21 @@ static inline bool modify_todo(Todo *todo) { return add_or_modify_todo(todo); }
 
 bool command_modify()
 {
-    if (args.count > 2) {
+    bool flag_error = false;
+    for (size_t i = 0; i < flags.count; i++) {
+        char *flag = flags.items[i];
+        printf("ERROR: unknown flag `%s` for command modify\n", flag);
+        printf("TODO: print command usage\n");
+        flag_error = true;
+    }
+    if (flag_error) return false;
+
+    if (args.count > 1) {
         // TODO report error too many arguments
         return false;
-    } else if (args.count == 2) {
-        if (!check_valid_todo_path(args.items[1])) return false;
-        else todo_path = args.items[1];
+    } else if (args.count == 1) {
+        if (!check_valid_todo_path(args.items[0])) return false;
+        else todo_path = args.items[0];
     }
 
     Todos todos = {0};
@@ -407,12 +541,12 @@ bool command_modify()
     }
 
     int index = 0;
-    printf("Insert the number of the todo that you want to modify (or insert `quit`)\n");
-    while (index <= 0) {
+    printf("Insert the number of the todo that you want to modify (or type `quit`/'q')\n");
+    while (index <= 0 || (size_t)index >= todos.count) {
         char buffer[16] = {0};
         read(STDIN_FILENO, buffer, sizeof(buffer));; 
         buffer[strlen(buffer)-1] = '\0';
-        if (streq(buffer, "quit"))
+        if (strneq(buffer, "quit", 4) || strneq(buffer, "q", 1))
             return false;
         index = atoi(buffer);
         printf("index: %d\n", index);
@@ -444,12 +578,21 @@ bool command_modify()
 
 bool command_complete()
 {
-    if (args.count > 2) {
+    bool flag_error = false;
+    for (size_t i = 0; i < flags.count; i++) {
+        char *flag = flags.items[i];
+        printf("ERROR: unknown flag `%s` for command complete\n", flag);
+        printf("TODO: print command usage\n");
+        flag_error = true;
+    }
+    if (flag_error) return false;
+
+    if (args.count > 1) {
         // TODO report error too many arguments
         return false;
-    } else if (args.count == 2) {
-        if (!check_valid_todo_path(args.items[1])) return false;
-        else todo_path = args.items[1];
+    } else if (args.count == 1) {
+        if (!check_valid_todo_path(args.items[0])) return false;
+        else todo_path = args.items[0];
     }
 
     Todos todos = {0};
@@ -464,12 +607,12 @@ bool command_complete()
     }
 
     int index = 0;
-    printf("Insert the number of the todo that you want to complete (or insert `quit`)\n");
-    while (index <= 0) {
+    printf("Insert the number of the todo that you want to complete (or type `quit`/'q')\n");
+    while (index <= 0 || (size_t)index >= todos.count) {
         char buffer[16] = {0};
         read(STDIN_FILENO, buffer, sizeof(buffer));; 
         buffer[strlen(buffer)-1] = '\0';
-        if (streq(buffer, "quit"))
+        if (strneq(buffer, "quit", 4) || strneq(buffer, "q", 1))
             return false;
         index = atoi(buffer);
         printf("index: %d\n", index);
@@ -499,14 +642,23 @@ bool command_complete()
     return true;
 }
 
-bool command_remove()
+bool command_delete()
 {
-    if (args.count > 2) {
+    bool flag_error = false;
+    for (size_t i = 0; i < flags.count; i++) {
+        char *flag = flags.items[i];
+        printf("ERROR: unknown flag `%s` for command delete\n", flag);
+        printf("TODO: print command usage\n");
+        flag_error = true;
+    }
+    if (flag_error) return false;
+
+    if (args.count > 1) {
         // TODO report error too many arguments
         return false;
-    } else if (args.count == 2) {
-        if (!check_valid_todo_path(args.items[1])) return false;
-        else todo_path = args.items[1];
+    } else if (args.count == 1) {
+        if (!check_valid_todo_path(args.items[0])) return false;
+        else todo_path = args.items[0];
     }
 
     Todos todos = {0};
@@ -518,12 +670,12 @@ bool command_remove()
     }
 
     int index = 0;
-    printf("Insert the number of the todo that you want to remove (or insert `quit`)\n");
-    while (index <= 0) {
+    printf("Insert the number of the todo that you want to delete (or type `quit`/'q')\n");
+    while (index <= 0 || (size_t)index >= todos.count) {
         char buffer[16] = {0};
         read(STDIN_FILENO, buffer, sizeof(buffer));; 
         buffer[strlen(buffer)-1] = '\0';
-        if (streq(buffer, "quit"))
+        if (strneq(buffer, "quit", 4) || strneq(buffer, "q", 1))
             return false;
         index = atoi(buffer);
         printf("index: %d\n", index);
@@ -542,30 +694,8 @@ bool command_remove()
         todo_print(todos.items[i], f);
     }
     fclose(f);
-    printf("INFO: todo %d has been removed\n", index);
+    printf("INFO: todo %d has been deleted\n", index);
     return true;
-}
-
-typedef enum
-{
-    CMD_SHOW,
-    TODO_PATH,
-    CMD_ADD,
-    CMD_COMPLETE,
-    CMD_REMOVE,
-    CMD_MODIFY,
-    CMDS_COUNT
-} Command;
-
-static_assert(CMDS_COUNT == 6, "Get all commands from string in get_command");
-Command get_command(char *str)
-{
-         if (streq(str, "show"))     return CMD_SHOW;
-    else if (streq(str, "add"))      return CMD_ADD;
-    else if (streq(str, "complete")) return CMD_COMPLETE;
-    else if (streq(str, "remove"))   return CMD_REMOVE;
-    else if (streq(str, "modify"))   return CMD_MODIFY;
-    else                             return TODO_PATH;
 }
 
 int main(int argc, char **argv)
@@ -576,45 +706,37 @@ int main(int argc, char **argv)
         char *arg = argv[i];
         if (*arg == '-') {
             arg++;
+            if (!*arg) {
+                printf("ERROR: flag without name (lonely dash)\n");
+                return 1;
+            }
             da_push(&flags, arg);
         } else {
             da_push(&args, arg);
         }
     }
 
-    for (size_t i = 0; i < flags.count; i++) {
-        char *flag = flags.items[i];
-        if (streq(flag, "all")) flag_all = true;    
-        else if (streq(flag, "help") || streq(flag, "h")) {
-            info();
-            return 0;
-        } else {
-            printf("ERROR: unknown flag `%s`\n", flag);
-            usage();
-            return 1;
-        }
+    Command command = args.count == 0 ? CMD_SHOW : get_command(args.items[0]);
+    if (command != CMD_SHOW && command != CMD_IS_PATH) {
+        shift_args();
     }
 
-    Command command = args.count > 0 ? get_command(args.items[0]) : CMD_SHOW;
-
-    static_assert(CMDS_COUNT == 6, "Switch all commands");
+    bool result = true;
+    static_assert(CMDS_COUNT == 7, "Switch all commands in main");
     switch (command)
     {
-        case CMD_SHOW: if (!command_show()) return 1; break;
-        case TODO_PATH:
-        {
-            if (!check_valid_todo_path(args.items[0])) return 1;
-            todo_path = args.items[0];
-            command_show();
-        } break;
-        case CMD_ADD:      if (!command_add())      return 1; break; 
-        case CMD_COMPLETE: if (!command_complete()) return 1; break;
-        case CMD_REMOVE:   if (!command_remove())   return 1; break;
-        case CMD_MODIFY:   if (!command_modify())   return 1; break;
+        case CMD_SHOW:
+        case CMD_IS_PATH:  result = command_show();     break;
+        case CMD_ADD:      result = command_add();      break; 
+        case CMD_COMPLETE: result = command_complete(); break;
+        case CMD_DELETE:   result = command_delete();   break;
+        case CMD_MODIFY:   result = command_modify();   break;
+        case CMD_HELP:     result = command_help();     break;
         default:
-            printf("Unreachable\n");
+            printf("Unreachable switching command in main\n");
             abort();
     }
 
-    return 0;
+    if (result) return 0;
+    else        return 1;
 }
