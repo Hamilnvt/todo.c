@@ -1,17 +1,17 @@
 // TODO:
-// - add tags to group todos
-// - maybe remove command CMD_IS_PATH
-// - completed can be just the x and uncompleted has nothing
+// - spread tags in all commands
 // - what if I wanted to uncomplete a todo?
 //   > introduce -all flag for complete/delete/modify commands
 //     - "completing" a completed todo makes it uncompleted (maybe with a warning and an input confirmation)
 // - idea for a command: comments parser to detect and create todos from a file
+// - get_all_todos can become get_todos and it takes as arguments the flags like completed/all, tags...
 
 #include <stdio.h>
 #include <unistd.h>
 #include <stdbool.h>
 #include <string.h>
 #include <ctype.h>
+#include <stddef.h>
 
 #include "/home/mathieu/Coding/C/libs/dynamic_arrays.h"
 
@@ -28,13 +28,22 @@ static char *todo_path = DEFAULT_TODO_PATH;
 #define DIVIDER_STR "----------"
 #define DIVIDER_STR_WITH_NL DIVIDER_STR"\n"
 
+#define ANSI_CLEAR_SCREEN "\x1b[2J"
+#define ANSI_GO_HOME_CURSOR "\x1B[H"
+void clear_screen()
+{
+    printf(ANSI_CLEAR_SCREEN); 
+    printf(ANSI_GO_HOME_CURSOR); 
+    fflush(stdout);
+}
+
 static inline bool streq(const char *s1, const char *s2) { return strcmp(s1, s2) == 0; }
 static inline bool strneq(const char *s1, const char *s2, size_t n) { return strncmp(s1, s2, n) == 0; }
 
 typedef enum
 {
     CMD_SHOW,
-    CMD_IS_PATH,
+    CMD_MAY_BE_PATH,
     CMD_ADD,
     CMD_COMPLETE,
     CMD_DELETE,
@@ -51,6 +60,7 @@ typedef struct
 } AoS;
 static AoS args = {0};
 static AoS flags = {0};
+static AoS tags = {0};
 
 void shift_args()
 {
@@ -63,6 +73,7 @@ typedef struct
     char *body;
     size_t priority;
     bool completed;
+    char *tag;
 } Todo;
 
 void todo_print(Todo t, FILE *sink)
@@ -70,7 +81,8 @@ void todo_print(Todo t, FILE *sink)
     fprintf(sink, "[");
     if (t.completed) fprintf(sink, "x");
     fprintf(sink, "] ");
-    if (t.priority) fprintf(sink, "%zu", t.priority);
+    if (t.priority) fprintf(sink, "%zu ", t.priority);
+    if (t.tag) fprintf(sink, "@%s", t.tag);
     fprintf(sink, "\n");
 
     fprintf(sink, DIVIDER_STR_WITH_NL);
@@ -167,8 +179,8 @@ bool parse_todo(char **content, Todo *todo)
         printf("ERROR: reached end of file while parsing todo\n");
         return_defer(false);
     }
-    if (*it != '\n' && !isdigit(*it)) {
-        printf("ERROR: expecting the priority number or nothing, but got '%c'\n", *it);
+    if (*it != '\n' && !isdigit(*it) && *it != '@') {
+        printf("ERROR: expecting the priority number, a tag or nothing, but got '%c'\n", *it);
         return_defer(false);
     }
     if (isdigit(*it)) {
@@ -190,10 +202,26 @@ bool parse_todo(char **content, Todo *todo)
         return_defer(false);
     }
     if (*it == '@') {
-        printf("ERROR: tags are not yet supported\n");
+        it++;
+        char *end_tag = it;
+        // TODO: also check if *it
+        while (!isspace(*end_tag)) end_tag++;
+        if (end_tag == it) {
+            printf("ERROR: empty tag\n");
+            return_defer(false);
+        }
+        ptrdiff_t tag_len = end_tag - it;
+        todo->tag = malloc(tag_len+1);
+        strncpy(todo->tag, it, tag_len);
+        todo->tag[tag_len] = '\0';
+        it = end_tag;
+    }
+
+    trim_left(&it);
+    if (!*it) {
+        printf("ERROR: reached end of file while parsing todo\n");
         return_defer(false);
     }
-    //printf("`%s`", it);
     if (*it != '\n') {
         printf("ERROR: expecting new line but got '%c'\n", *it);
         return_defer(false);
@@ -281,7 +309,7 @@ void command_usage(Command cmd)
             printf("    usage:\n        todo [show] [path]\n");
             printf("    flags:\n        -all                also print completed todos\n");
         } break;
-        case CMD_IS_PATH:
+        case CMD_MAY_BE_PATH:
         {
             printf("TODO: command_help for command that is a path\n");
         } break;
@@ -320,7 +348,7 @@ Command get_command(char *str)
     else if (streq(str, "delete")   || streq(str, "del")) return CMD_DELETE;
     else if (streq(str, "modify")   || streq(str, "mod")) return CMD_MODIFY;
     else if (streq(str, "help"))                          return CMD_HELP;
-    else                                                  return CMD_IS_PATH;
+    else                                                  return CMD_MAY_BE_PATH;
 }
 
 bool command_help()
@@ -341,7 +369,7 @@ bool command_help()
         command_usage(CMD_HELP);
     } else {
         Command cmd = get_command(args.items[0]);
-        if (cmd == CMD_IS_PATH) {
+        if (cmd == CMD_MAY_BE_PATH) {
             printf("ERROR: unknown command  `%s`\n", args.items[0]);
             return false;
         }
@@ -381,11 +409,24 @@ bool get_all_todos(Todos *todos)
     if (!parse_todos(content, todos)) return false;
     if (todos->count == 0) {
         printf("INFO: no todos found at `%s`\n", todo_path);
-        printf("NOTE: you can add one with this command: %s add\n", program_name);
+        printf("NOTE: to add one use the command: %s add %s\n",
+                program_name,
+                streq(todo_path, DEFAULT_TODO_PATH) ? "" : todo_path);
         return false;
     }
     qsort(todos->items, todos->count, sizeof(todos->items[0]), compare_todos_descending_priority);
     return true;
+}
+
+bool todo_has_selected_tag(Todo t)
+{
+    if (!t.tag || tags.count == 0) return true;
+    for (size_t j = 0; j < tags.count; j++) {
+        if (streq(t.tag, tags.items[j])) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool command_show()
@@ -417,9 +458,10 @@ bool command_show()
 
     Todos todos = {0};
     if (!get_all_todos(&todos)) return false;
+    clear_screen();
     for (size_t i = 0; i < todos.count; i++) {
         Todo t = todos.items[i];
-        if (!t.completed || show_all)
+        if ((!t.completed || show_all) && todo_has_selected_tag(t))
             todo_print(t, stdout);
     }
     return true;
@@ -532,6 +574,7 @@ bool command_modify()
 
     Todos todos = {0};
     if (!get_all_todos(&todos)) return false;
+    clear_screen();
     int n = 1;
     for (size_t i = 0; i < todos.count; i++) {
         Todo t = todos.items[i];
@@ -601,9 +644,10 @@ bool command_complete()
     while (true) {
         if (!get_all_todos(&todos)) return false;
         int n = 0;
+        clear_screen();
         for (size_t i = 0; i < todos.count; i++) {
             Todo t = todos.items[i];
-            if (t.completed) continue;
+            if (t.completed || !todo_has_selected_tag(t)) continue;
             n++;
             printf("%d.\n", n);
             todo_print(t, stdout);
@@ -630,7 +674,7 @@ bool command_complete()
         n = 1;
         for (size_t i = 0; i < todos.count; i++) {
             Todo *t = &todos.items[i];
-            if (t->completed) continue;
+            if (t->completed || !todo_has_selected_tag(*t)) continue;
             if (n == index) {
                 t->completed = true;
                 break;
@@ -714,6 +758,7 @@ bool command_delete()
     Todos todos = {0};
     while (true) {
         if (!get_all_todos(&todos)) return false;
+        clear_screen();
         for (size_t i = 0; i < todos.count; i++) {
             Todo t = todos.items[i];
             printf("%zu.\n", i+1);
@@ -769,13 +814,20 @@ int main(int argc, char **argv)
                 return 1;
             }
             da_push(&flags, arg);
+        } else if (*arg == '@') {
+            arg++;
+            if (!*arg) {
+                printf("ERROR: tag without name (lonely at)\n");
+                return 1;
+            }
+            da_push(&tags, arg);
         } else {
             da_push(&args, arg);
         }
     }
 
     Command command = args.count == 0 ? CMD_SHOW : get_command(args.items[0]);
-    if (command != CMD_SHOW && command != CMD_IS_PATH) {
+    if (command != CMD_SHOW && command != CMD_MAY_BE_PATH) {
         shift_args();
     }
 
@@ -784,12 +836,12 @@ int main(int argc, char **argv)
     switch (command)
     {
         case CMD_SHOW:
-        case CMD_IS_PATH:  result = command_show();     break;
-        case CMD_ADD:      result = command_add();      break; 
-        case CMD_COMPLETE: result = command_complete(); break;
-        case CMD_DELETE:   result = command_delete();   break;
-        case CMD_MODIFY:   result = command_modify();   break;
-        case CMD_HELP:     result = command_help();     break;
+        case CMD_MAY_BE_PATH: result = command_show();     break;
+        case CMD_ADD:         result = command_add();      break; 
+        case CMD_COMPLETE:    result = command_complete(); break;
+        case CMD_DELETE:      result = command_delete();   break;
+        case CMD_MODIFY:      result = command_modify();   break;
+        case CMD_HELP:        result = command_help();     break;
         default:
             printf("Unreachable switching command in main\n");
             abort();
