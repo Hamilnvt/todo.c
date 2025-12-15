@@ -1,10 +1,3 @@
-// TODO:
-// - spread tags in all commands
-// - what if I wanted to uncomplete a todo?
-//   > introduce -all flag for complete/delete/modify commands
-//     - "completing" a completed todo makes it uncompleted (maybe with a warning and an input confirmation)
-// - idea for a command: comments parser to detect and create todos from a file
-
 #include <stdio.h>
 #include <unistd.h>
 #include <stdbool.h>
@@ -186,7 +179,7 @@ bool parse_todo(char **content, Todo *todo)
         return_defer(false);
     }
     if (isdigit(*it)) {
-        char *end = it;
+        char *end;
         long priority = strtol(it, &end, 10);
         if (priority <= 0) {
             *end = '\0';
@@ -482,10 +475,23 @@ bool add_or_modify_todo(Todo *todo)
             todo_fprint(*todo, f);
         } else {
             Todo template_todo = {0};
+            if (tags.count == 1) {
+                template_todo.tag = tags.items[0];
+            } else if (tags.count > 1) {
+                printf("ERROR: at the moment only one tag at a time is supported\n");
+                printf("NOTE: tags: ");
+                for (size_t i = 0; i < tags.count; i++) {
+                    printf("%s", tags.items[i]);
+                    if (i != tags.count-1)
+                        printf(",");
+                    printf(" ");
+                }
+                printf("\n");
+                return false;
+            }
             todo_fprint(template_todo, f);
         }
         fprintf(f, "Any text inserted after the second line will be ignored\n");
-        // TODO: right now if you modify a completed todo it will be marked as not completed
         fclose(f);
     }
     char cmd[256] = {0};
@@ -560,16 +566,23 @@ size_ts get_todo_indexes(Todos todos, bool all)
 bool get_todo_index_from_user(int *index, size_t count, char *action)
 {
     printf("Insert the number of the todo that you want to %s (or type `quit`/'q')\n", action);
-    do {
+    while (true) {
+        printf("> ");
         char buffer[16] = {0};
-        read(STDIN_FILENO, buffer, sizeof(buffer));
+        fgets(buffer, sizeof(buffer), stdin);
         buffer[strlen(buffer)-1] = '\0';
         if (strneq(buffer, "quit", 4) || strneq(buffer, "q", 1))
             return false;
-        *index = atoi(buffer);
-        if (*index > 0) break;
-        else printf("ERROR: `%s` is not a valid number, check again.\n", buffer);
-    } while (*index <= 0 || (size_t)*index >= count);
+        char *end;
+        *index = strtol(buffer, &end, 10);
+        if (buffer != end
+            && *end == '\0'
+            && *index >= 0
+            && (size_t)*index < count) break;
+        else {
+            printf("ERROR: `%s` is not a valid number.\n", buffer);
+        }
+    }
     return true;
 }
 
@@ -589,12 +602,18 @@ bool save_todos_to_file(Todos todos)
 
 bool command_modify(void)
 {
+    bool modify_all = false;
+
     bool flag_error = false;
     for (size_t i = 0; i < flags.count; i++) {
         char *flag = flags.items[i];
-        printf("ERROR: unknown flag `%s` for command modify\n", flag);
-        printf("TODO: print command usage\n");
-        flag_error = true;
+        if (streq(flag, "all") || streq(flag, "a")) {
+            modify_all = true;
+        } else {
+            printf("ERROR: unknown flag `%s` for command modify\n", flag);
+            printf("TODO: print command usage\n");
+            flag_error = true;
+        }
     }
     if (flag_error) return false;
 
@@ -609,11 +628,11 @@ bool command_modify(void)
 
     Todos todos = {0};
     if (!get_all_todos(&todos)) return false;
-    size_ts indexes = get_todo_indexes(todos, !ALL);
+    size_ts indexes = get_todo_indexes(todos, modify_all);
     clear_screen();
     for (size_t i = 0; i < indexes.count; i++) {
         Todo t = todos.items[indexes.items[i]];
-        printf("%zu.\n", i+1);
+        printf("%zu.\n", i);
         todo_print(t);
     }
 
@@ -622,8 +641,18 @@ bool command_modify(void)
     if (!modify_todo(&todos.items[indexes.items[index]])) return false;
     if (!save_todos_to_file(todos)) return false;
 
-    printf("INFO: todo %d has been modified\n", index+1);
+    printf("INFO: todo %d has been modified\n", index);
     return true;
+}
+
+bool ask_user_yes_or_no(void)
+{
+    char buffer[16] = {0};
+    ssize_t nread = read(STDIN_FILENO, buffer, sizeof(buffer));
+    buffer[nread-1] = '\0';
+    if (tolower(*buffer) != 'y' && !strneq(buffer, "yes", 3))
+        return false;
+    else return true;
 }
 
 bool command_complete(void)
@@ -646,7 +675,6 @@ bool command_complete(void)
         else todo_path = args.items[0];
     }
 
-    char buffer[64] = {0};
     Todos todos = {0};
     while (true) {
         if (!get_all_todos(&todos)) return false;
@@ -654,7 +682,7 @@ bool command_complete(void)
         clear_screen();
         for (size_t i = 0; i < indexes.count; i++) {
             Todo t = todos.items[indexes.items[i]];
-            printf("%zu.\n", i+1);
+            printf("%zu.\n", i);
             todo_print(t);
         }
 
@@ -671,10 +699,7 @@ bool command_complete(void)
         printf("INFO: todo %d has been marked as completed\n", index);
 
         printf("\nContinue completing? y/N\n");
-        ssize_t nread = read(STDIN_FILENO, buffer, sizeof(buffer));; 
-        buffer[nread-1] = '\0';
-        if (tolower(*buffer) != 'y' && !strneq(buffer, "yes", 3))
-            return true;
+        if (!ask_user_yes_or_no()) return true;
     }
     printf("Unreachable in command_complete\n");
     abort();
@@ -753,14 +778,13 @@ bool command_delete(void)
         return delete_completed_todos();
     }
 
-    char buffer[64] = {0};
     Todos todos = {0};
     while (true) {
         if (!get_all_todos(&todos)) return false;
         clear_screen();
         for (size_t i = 0; i < todos.count; i++) {
             Todo t = todos.items[i];
-            printf("%zu.\n", i+1);
+            printf("%zu.\n", i);
             todo_print(t);
         }
 
@@ -775,10 +799,7 @@ bool command_delete(void)
         printf("INFO: todo %d has been deleted\n", index);
 
         printf("\nContinue deleting? y/N\n");
-        ssize_t nread = read(STDIN_FILENO, buffer, sizeof(buffer));; 
-        buffer[nread-1] = '\0';
-        if (tolower(*buffer) != 'y' && !strneq(buffer, "yes", 3))
-            return true;
+        if (!ask_user_yes_or_no()) return true;
     }
     printf("Unreachable in command_delete\n");
     abort();
