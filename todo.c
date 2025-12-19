@@ -35,12 +35,12 @@ static inline bool strneq(const char *s1, const char *s2, size_t n) { return str
 typedef enum
 {
     CMD_SHOW,
-    CMD_MAY_BE_PATH,
     CMD_ADD,
     CMD_COMPLETE,
     CMD_DELETE,
     CMD_MODIFY,
     CMD_HELP,
+    CMD_UNKNOWN,
     CMDS_COUNT
 } Command;
 
@@ -74,6 +74,8 @@ typedef struct
     bool completed;
     char *tag;
 } Todo;
+
+static Todo template_todo = {0};
 
 void todo_fprint(Todo t, FILE *sink)
 {
@@ -289,10 +291,6 @@ void command_usage(Command cmd)
             printf("    usage:\n        todo [show] [path]\n");
             printf("    flags:\n        -all                also print completed todos\n");
         } break;
-        case CMD_MAY_BE_PATH:
-        {
-            printf("TODO: command_help for command that is a path\n");
-        } break;
         case CMD_ADD:
         {
             printf("TODO: command_help for command add\n");
@@ -313,6 +311,7 @@ void command_usage(Command cmd)
         {
             printf("TODO: command_help for command help\n");
         } break;
+        case CMD_UNKNOWN:
         default:
             printf("Unreachable switching command in command_help\n");
             abort();
@@ -328,7 +327,7 @@ Command get_command(char *str)
     else if (streq(str, "delete")   || streq(str, "del")) return CMD_DELETE;
     else if (streq(str, "modify")   || streq(str, "mod")) return CMD_MODIFY;
     else if (streq(str, "help"))                          return CMD_HELP;
-    else                                                  return CMD_MAY_BE_PATH;
+    else                                                  return CMD_UNKNOWN;
 }
 
 bool command_help(void)
@@ -350,7 +349,7 @@ bool command_help(void)
         command_usage(CMD_HELP);
     } else {
         Command cmd = get_command(args.items[0]);
-        if (cmd == CMD_MAY_BE_PATH) {
+        if (cmd == CMD_UNKNOWN) {
             printf("ERROR: unknown command  `%s`\n", args.items[0]);
             return false;
         }
@@ -427,16 +426,10 @@ bool command_show(void)
     }
     if (flag_error) return false;
 
-    if (args.count > 1) {
+    if (args.count > 0) {
         printf("ERROR: too many arguments for command show\n");
         command_usage(CMD_SHOW);
         return false;
-    } else if (args.count == 1) {
-        if (!check_valid_todo_path(args.items[0])) return false;
-        else {
-            todo_path = args.items[0];
-            shift_args();
-        }
     }
 
     Todos todos = {0};
@@ -474,7 +467,6 @@ bool add_or_modify_todo(Todo *todo)
         if (modify) {
             todo_fprint(*todo, f);
         } else {
-            Todo template_todo = {0};
             if (tags.count == 1) {
                 template_todo.tag = tags.items[0];
             } else if (tags.count > 1) {
@@ -544,8 +536,21 @@ bool command_add(void)
         command_usage(CMD_ADD);
         return false;
     } else if (args.count == 1) {
-        if (!check_valid_todo_path(args.items[0])) return false;
-        else todo_path = args.items[0];
+        char *arg = args.items[0];
+        if (isdigit(*arg)) {
+            char *end;
+            long priority = strtol(arg, &end, 10);
+            if (priority <= 0 || *end != '\0') {
+                printf("ERROR: priority should be a positive integer greater than zero\n");
+                printf("NOTE: you inserted `%s`\n", arg);
+                return false;
+            }
+            template_todo.priority = priority;
+        } else {
+            printf("ERROR: priority should be a positive integer greater than zero\n");
+            printf("NOTE: you inserted `%s`\n", arg);
+            return false;
+        }
     }
 
     return add_todo();
@@ -617,13 +622,10 @@ bool command_modify(void)
     }
     if (flag_error) return false;
 
-    if (args.count > 1) {
+    if (args.count > 0) {
         printf("ERROR: too many arguments for command modify\n");
         command_usage(CMD_MODIFY);
         return false;
-    } else if (args.count == 1) {
-        if (!check_valid_todo_path(args.items[0])) return false;
-        else todo_path = args.items[0];
     }
 
     Todos todos = {0};
@@ -666,13 +668,10 @@ bool command_complete(void)
     }
     if (flag_error) return false;
 
-    if (args.count > 1) {
+    if (args.count > 0) {
         printf("ERROR: too many arguments for command complete\n");
         command_usage(CMD_COMPLETE);
         return false;
-    } else if (args.count == 1) {
-        if (!check_valid_todo_path(args.items[0])) return false;
-        else todo_path = args.items[0];
     }
 
     Todos todos = {0};
@@ -727,7 +726,7 @@ bool delete_completed_todos(void)
     while (i < todos.count) {
         t = todos.items[i];
         if (t.completed && todo_has_selected_tag(t))
-            da_remove(&todos, i, t);
+            da_remove(&todos, i);
         else i++;
     }
     size_t after = todos.count;
@@ -760,13 +759,10 @@ bool command_delete(void)
     }
     if (flag_error) return false;
 
-    if (args.count > 1) {
+    if (args.count > 0) {
         printf("ERROR: too many arguments for command delete\n");
         command_usage(CMD_DELETE);
         return false;
-    } else if (args.count == 1) {
-        if (!check_valid_todo_path(args.items[0])) return false;
-        else todo_path = args.items[0];
     }
 
     if (deleted_all) {
@@ -791,8 +787,7 @@ bool command_delete(void)
         int index;
         if (!get_todo_index_from_user(&index, todos.count, "delete")) return false;
 
-        Todo t; (void)t;
-        da_remove(&todos, index-1, t);
+        da_remove(&todos, index-1);
 
         if (!save_todos_to_file(todos)) return false;
 
@@ -813,11 +808,22 @@ int main(int argc, char **argv)
         char *arg = argv[i];
         if (*arg == '-') {
             arg++;
-            if (!*arg) {
+            char *flag = arg;
+            if (!*flag) {
                 printf("ERROR: flag without name (lonely dash)\n");
                 return 1;
             }
-            da_push(&flags, arg);
+            if (streq(flag, "path") || streq(flag, "p")) {
+                if (i+1 >= argc) {
+                    printf("ERROR: expected path after flag -path, but got nothing\n");
+                    return 1;
+                }
+                char *path = argv[i+i];
+                if (!check_valid_todo_path(path)) return 1;
+                else todo_path = path;
+            } else {
+                da_push(&flags, flag);
+            }
         } else if (*arg == '@') {
             arg++;
             if (!*arg) {
@@ -830,8 +836,9 @@ int main(int argc, char **argv)
         }
     }
 
-    Command command = args.count == 0 ? CMD_SHOW : get_command(args.items[0]);
-    if (command != CMD_SHOW && command != CMD_MAY_BE_PATH) {
+    Command command = CMD_SHOW;
+    if (args.count != 0) {
+        command = get_command(args.items[0]);
         shift_args();
     }
 
@@ -839,18 +846,19 @@ int main(int argc, char **argv)
     static_assert(CMDS_COUNT == 7, "Switch all commands in main");
     switch (command)
     {
-        case CMD_SHOW:
-        case CMD_MAY_BE_PATH: result = command_show();     break;
-        case CMD_ADD:         result = command_add();      break; 
-        case CMD_COMPLETE:    result = command_complete(); break;
-        case CMD_DELETE:      result = command_delete();   break;
-        case CMD_MODIFY:      result = command_modify();   break;
-        case CMD_HELP:        result = command_help();     break;
+        case CMD_SHOW:     result = command_show();     break;
+        case CMD_ADD:      result = command_add();      break; 
+        case CMD_COMPLETE: result = command_complete(); break;
+        case CMD_DELETE:   result = command_delete();   break;
+        case CMD_MODIFY:   result = command_modify();   break;
+        case CMD_HELP:     result = command_help();     break;
+        case CMD_UNKNOWN: {
+            printf("ERROR: unknown command `%s`\n", args.items[0]);
+        } break;
         default:
             printf("Unreachable switching command in main\n");
             abort();
     }
 
-    if (result) return 0;
-    else        return 1;
+    return result ? 0 : 1;
 }
