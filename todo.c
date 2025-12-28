@@ -15,11 +15,27 @@
     } while (0)
 
 #define FILE_EXTENSION "td"
-#define DEFAULT_TODO_PATH "/home/mathieu/todos/all.td"
-static char *todo_path = DEFAULT_TODO_PATH;
+static char *todo_path = NULL;
+static bool todo_path_is_custom = false;
 #define TMP_TODO_FILENAME "/tmp/todo_tmp_s395n8a697w3b87v8r" 
 #define DIVIDER_STR "----------"
 #define DIVIDER_STR_WITH_NL DIVIDER_STR"\n"
+
+bool set_default_todo_path(void)
+{
+    const char *home = getenv("HOME");
+    if (!home) {
+        printf("ERROR: could not get environment variable `HOME`\n");
+        return false;
+    }
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/.all.td", home);
+    const size_t len = strlen(path);
+    todo_path = malloc(sizeof(char)*(len+1));
+    strncpy(todo_path, path, len);
+    todo_path[len] = '\0';
+    return true;
+}
 
 #define ANSI_CLEAR_SCREEN "\x1b[2J"
 #define ANSI_GO_HOME_CURSOR "\x1B[H"
@@ -472,7 +488,7 @@ bool get_all_todos(Todos *todos)
         printf("INFO: no todos found at `%s`\n", todo_path);
         printf("NOTE: to add one use the command: %s add %s\n",
                 program_name,
-                streq(todo_path, DEFAULT_TODO_PATH) ? "" : todo_path);
+                todo_path_is_custom ? todo_path : "");
         return false;
     }
     qsort(todos->items, todos->count, sizeof(todos->items[0]), compare_todos_descending_priority);
@@ -929,9 +945,13 @@ int main(int argc, char **argv)
                     printf("ERROR: expected path after flag -path, but got nothing\n");
                     return 1;
                 }
-                char *path = argv[i+i];
+                char *path = argv[i+1];
                 if (!check_valid_todo_path(path)) return 1;
-                else todo_path = path;
+                else {
+                    todo_path = path;
+                    todo_path_is_custom = true;
+                    i++;
+                }
             } else {
                 da_push(&flags, flag);
             }
@@ -945,6 +965,10 @@ int main(int argc, char **argv)
         } else {
             da_push(&args, arg);
         }
+    }
+
+    if (todo_path == NULL) {
+        if (!set_default_todo_path()) return 1;
     }
 
     Command command = CMD_SHOW;
