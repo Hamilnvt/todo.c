@@ -33,19 +33,22 @@ void clear_screen(void)
 void printf_indent(int indent, char *fmt, ...)
 {
     if (fmt == NULL) return;
-    va_list ap;
-    va_start(ap, fmt);
+
     char indent_fmt[4096] = {0};
     snprintf(indent_fmt, sizeof(indent_fmt), "%-*s%s", indent, "", fmt);
+
     char buffer[4096] = {0};
+    va_list ap;
+    va_start(ap, fmt);
     vsnprintf(buffer, sizeof(buffer), indent_fmt, ap);
     va_end(ap);
+
     char *line = strtok(buffer, "\n");
-    if (line) {
-        printf("%s\n", line);
-        line = strtok(NULL, "\n");
-        printf_indent(indent, line);
-    }
+    if (!line) return;
+
+    printf("%s\n", line);
+    line = strtok(NULL, "\n");
+    printf_indent(indent, line);
 }
 
 static inline bool streq(const char *s1, const char *s2) { return strcmp(s1, s2) == 0; }
