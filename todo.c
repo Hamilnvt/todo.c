@@ -6,7 +6,7 @@
 #include <stddef.h>
 #include <stdarg.h>
 
-#include "/home/mathieu/Coding/C/libs/dynamic_arrays.h"
+#include "dynamic_arrays.h"
 
 #define return_defer(value) \
     do {                    \
@@ -17,7 +17,7 @@
 #define FILE_EXTENSION "td"
 static char *todo_path = NULL;
 static bool todo_path_is_custom = false;
-#define TMP_TODO_FILENAME "/tmp/todo_tmp_s395n8a697w3b87v8r" 
+static char tmp_todo_filename[64] = "/tmp/todo_XXXXXX";
 #define DIVIDER_STR "----------"
 #define DIVIDER_STR_WITH_NL DIVIDER_STR"\n"
 
@@ -91,6 +91,16 @@ typedef struct
 static AoS args = {0};
 static AoS flags = {0};
 static AoS tags = {0};
+
+void print_aos(AoS aos)
+{
+    for (size_t i = 0; i < aos.count; i++) {
+        printf("'%s'", aos.items[i]);
+        if (i != aos.count-1) printf(",");
+        printf(" ");
+    }
+    printf("\n");
+}
 
 typedef struct
 {
@@ -544,6 +554,14 @@ bool command_show(void)
     Todos todos = {0};
     if (!get_all_todos(&todos)) return false;
     size_ts indexes = get_todo_indexes(todos, show_all);
+    if (indexes.count == 0) {
+        printf("There are no todos at `%s` ", todo_path);
+        if (tags.count > 0) {
+            printf("with tags ");
+            print_aos(tags);
+        }
+        return true;
+    }
     clear_screen();
     for (size_t i = 0; i < indexes.count; i++) {
         Todo t = todos.items[indexes.items[i]];
@@ -568,40 +586,42 @@ bool add_todo_to_file(Todo todo)
 bool add_or_modify_todo(Todo *todo)
 {
     bool modify = !!todo;
-    FILE *f = fopen(TMP_TODO_FILENAME, "w");
-    if (!f) {
-        printf("ERROR: Could not create temporary file in /tmp\n"); 
+    int fd = mkstemp(tmp_todo_filename);
+    if (fd == -1) {
+        printf("ERROR: Could not create temporary file\n");
         return false;
-    } else {
-        if (modify) {
-            todo_fprint(*todo, f);
-        } else {
-            if (tags.count == 1) {
-                template_todo.tag = tags.items[0];
-            } else if (tags.count > 1) {
-                printf("ERROR: at the moment only one tag at a time is supported\n");
-                printf("NOTE: tags: ");
-                for (size_t i = 0; i < tags.count; i++) {
-                    printf("%s", tags.items[i]);
-                    if (i != tags.count-1)
-                        printf(",");
-                    printf(" ");
-                }
-                printf("\n");
-                return false;
-            }
-            todo_fprint(template_todo, f);
-        }
-        fprintf(f, "Any text inserted after the second line will be ignored\n");
-        fclose(f);
     }
+    FILE *f = fdopen(fd, "w");
+    if (!f) {
+        printf("ERROR: Could not open temporary file\n"); 
+        close(fd);
+        return false;
+    }
+
+    if (modify) {
+        todo_fprint(*todo, f);
+    } else {
+        if (tags.count == 1) {
+            template_todo.tag = tags.items[0];
+        } else if (tags.count > 1) {
+            printf("ERROR: at the moment only one tag at a time is supported\n");
+            printf("NOTE: tags: ");
+            print_aos(tags);
+            fclose(f);
+            return false;
+        }
+        todo_fprint(template_todo, f);
+    }
+    fprintf(f, "Any text inserted after the second line will be ignored\n");
+    fclose(f);
+
     char cmd[256] = {0};
-    sprintf(cmd, "$EDITOR %s", TMP_TODO_FILENAME);
+    sprintf(cmd, "$EDITOR %s", tmp_todo_filename);
     system(cmd);
-    char *content = read_file(TMP_TODO_FILENAME);
-    remove(TMP_TODO_FILENAME);
+    char *content = read_file(tmp_todo_filename);
+    remove(tmp_todo_filename);
     if (!content) {
-        printf("ERROR: could not read temporary todo file at `%s`\n", TMP_TODO_FILENAME);
+        printf("ERROR: could not read temporary todo file at `%s`\n", tmp_todo_filename);
         return false;
     }
 
@@ -750,12 +770,22 @@ bool command_modify(void)
 
 bool ask_user_confirmation(void)
 {
-    char buffer[16] = {0};
-    ssize_t nread = read(STDIN_FILENO, buffer, sizeof(buffer));
-    buffer[nread-1] = '\0';
-    if (tolower(*buffer) != 'y' && !strneq(buffer, "yes", 3))
-        return false;
-    else return true;
+    while (true) {
+        char buffer[64] = {0};
+        size_t nread = read(STDIN_FILENO, buffer, sizeof(buffer));
+        nread--;
+        buffer[nread] = '\0';
+        for (size_t i = 0; i <= nread; i++) {
+            buffer[i] = tolower(buffer[i]);
+        }
+        if ((nread == 3 && streq(buffer, "yes")) || (nread == 1 && *buffer == 'y'))
+            return true;
+        else if ((nread == 2 && streq(buffer, "no")) || (nread == 1 && *buffer == 'n'))
+            return false;
+
+        printf("(y)es or (n)o?\n");
+    }
+    return false;
 }
 
 bool command_complete(void)
@@ -798,18 +828,18 @@ bool command_complete(void)
         printf("INFO: todo %d has been marked as completed\n", index);
 
         if (indexes.count-1 == 0) {
-            printf("\nThere are no todo left to complete\n");
+            printf("\nThere are no todos left to complete\n");
             return true;
         }
 
-        printf("\nContinue completing? y/N\n");
+        printf("\nContinue completing? yes/no\n");
         if (!ask_user_confirmation()) return true;
     }
     printf("Unreachable in command_complete\n");
     abort();
 }
 
-bool delete_all_todos(void)
+bool clear_todo_file(void)
 {
     FILE *f = fopen(todo_path, "w");
     if (!f) {
@@ -817,42 +847,21 @@ bool delete_all_todos(void)
         return false;
     }
     fclose(f);
-    printf("Deleted all todos\n");
-    return true;
-}
-
-bool delete_completed_todos(void)
-{
-    Todos todos = {0};
-    if (!get_all_todos(&todos)) return false;
-    size_t i = 0;
-    Todo t;
-    size_t before = todos.count;
-    while (i < todos.count) {
-        t = todos.items[i];
-        if (t.completed && todo_has_selected_tag(t))
-            da_remove(&todos, i);
-        else i++;
-    }
-    size_t after = todos.count;
-
-    if (!save_todos_to_file(todos)) return false;
-
-    printf("Deleted %zu todos\n", before - after + 1);
+    printf("Todo file `%s` has been cleared\n", todo_path);
     return true;
 }
 
 bool command_delete(void)
 {
-    bool deleted_all = false;
+    bool delete_all = false;
     bool select_from_all = false;
-    bool deleted_completed = false;
+    bool delete_completed = false;
 
     bool flag_error = false;
     for (size_t i = 0; i < flags.count; i++) {
         char *flag = flags.items[i];
-        if (streq(flag, "A") || streq(flag, "ALL")) deleted_all = true;
-        else if (streq(flag, "c") || streq(flag, "completed")) deleted_completed = true;
+        if (streq(flag, "A") || streq(flag, "ALL")) delete_all = true;
+        else if (streq(flag, "c") || streq(flag, "completed")) delete_completed = true;
         else if (streq(flag, "a") || streq(flag, "all")) select_from_all = true;
         else {
             printf("ERROR: unknown flag `%s` for command delete\n", flag);
@@ -860,8 +869,9 @@ bool command_delete(void)
             flag_error = true;
         }
     }
-    if (deleted_all && deleted_completed) {
+    if (delete_all && delete_completed) {
         printf("ERROR: conflicting flags -all and -completed\n");
+        help_of(CMD_DELETE);
         flag_error = true;
     }
     if (flag_error) return false;
@@ -872,18 +882,42 @@ bool command_delete(void)
         return false;
     }
 
-    if (deleted_all) {
-        printf("Are you sure you want to delete ALL todos at `%s`? y/N\n", todo_path);
-        if (ask_user_confirmation())
-            return delete_all_todos();
-        else return true;
-    }
+    if (delete_all || delete_completed) {
+        if (delete_all)
+            printf("Delete ALL todos? yes/no\n");
+        else
+            printf("Delete all completed todos? yes/no\n");
+        printf("path: `%s`\n", todo_path);
+        if (tags.count > 0) {
+            printf("tags: ");
+            print_aos(tags);
+        }
 
-    if (deleted_completed) {
-        printf("Are you sure you want to delete the completed todos at `%s`? y/N\n", todo_path);
-        if (ask_user_confirmation())
-            return delete_completed_todos();
-        else return true;
+        bool confirmation = ask_user_confirmation();
+        if (!confirmation) return true;
+        if (delete_all && tags.count == 0) return clear_todo_file();
+
+        Todos todos = {0};
+        if (!get_all_todos(&todos)) return false;
+        size_t i = 0;
+        Todo t;
+        size_t count_before = todos.count;
+        while (i < todos.count) {
+            t = todos.items[i];
+            if (todo_has_selected_tag(t)) {
+                if (delete_completed && !t.completed) {
+                    i++;
+                    continue;
+                }
+                da_remove(&todos, i);
+            } else i++;
+        }
+        size_t count_after = todos.count;
+
+        if (!save_todos_to_file(todos)) return false;
+
+        printf("Deleted %zu todos\n", count_before - count_after + 1);
+        return true;
     }
 
     Todos todos = {0};
@@ -916,11 +950,11 @@ bool command_delete(void)
         printf("INFO: todo %d has been deleted\n", index);
 
         if (indexes.count-1 == 0) {
-            printf("\nThere are no todo left to delete\n");
+            printf("\nThere are no todos left to delete\n");
             return true;
         }
 
-        printf("\nContinue deleting? y/N\n");
+        printf("\nContinue deleting? yes/no\n");
         if (!ask_user_confirmation()) return true;
     }
     printf("Unreachable in command_delete\n");
