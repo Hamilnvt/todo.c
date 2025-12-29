@@ -5,6 +5,8 @@
 #include <ctype.h>
 #include <stddef.h>
 #include <stdarg.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 #include "dynamic_arrays.h"
 
@@ -470,17 +472,18 @@ bool check_valid_todo_path(char *path)
 {
     if (!path) return false;
 
-    FILE *f = fopen(path, "r");
-    if (!f) {
-        printf("ERROR: could not open file at `%s`\n", path);
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        printf("ERROR: could not stat file at `%s`: %s\n", path, strerror(errno));
         return false;
-    } else fclose(f);
+    }
+    if (S_ISDIR(st.st_mode)) {
+        printf("ERROR: `%s` is a directory, not a file\n", path);
+        return false;
+    }
 
     char *point = strrchr(path, '.');
-    bool got_extension = !!point;
-    point++;
-    got_extension |= streq(point, FILE_EXTENSION);
-    if (!got_extension) {
+    if (!point++ || !streq(point, FILE_EXTENSION)) {
         printf("ERROR: file `%s` has no extension `%s`\n", path, FILE_EXTENSION);
         return false; 
     }
@@ -509,8 +512,8 @@ bool todo_has_selected_tag(Todo t)
 {
     if (tags.count == 0) return true;
     if (!t.tag) return false;
-    for (size_t j = 0; j < tags.count; j++) {
-        if (streq(t.tag, tags.items[j])) {
+    for (size_t i = 0; i < tags.count; i++) {
+        if (streq(t.tag, tags.items[i])) {
             return true;
         }
     }
@@ -529,14 +532,92 @@ size_ts get_todo_indexes(Todos todos, bool all)
     return indexes;
 }
 
+void todo_free(Todo *t) {
+    if (t->body) free(t->body);
+    t->body = NULL; 
+    if (t->tag) free(t->tag);
+    t->tag = NULL;
+}
+
+bool get_all_tags(AoS *tags)
+{
+    Todos todos = {0};
+    if (!get_all_todos(&todos)) return false; 
+    da_clear(tags);
+    for (size_t i = 0; i < todos.count; i++) {
+        Todo t = todos.items[i];
+        if (t.tag == NULL) continue;
+        bool found = false;
+        for (size_t j = 0; j < tags->count; j++) {
+            if (streq(t.tag, tags->items[j])) {
+                found = true;
+                break;
+            }
+        }
+        if (found) continue;
+        da_push(tags, strdup(t.tag));
+        todo_free(&t);
+    }
+    da_free(&todos);
+    return true;
+}
+
+bool print_all_tags_from_todo_path(void)
+{
+    AoS tags = {0};
+    if (!get_all_tags(&tags)) return false;
+    for (size_t i = 0; i < tags.count; i++) {
+        char *tag = tags.items[i];
+        printf("%zu. %s\n", i, tag);
+        free(tag);
+    }
+    return true;
+}
+
+bool ask_user_confirmation(void)
+{
+    while (true) {
+        char buffer[64] = {0};
+        ssize_t nread = read(STDIN_FILENO, buffer, sizeof(buffer));
+        if (nread == -1) {
+            printf("ERROR: could not read confirmation from stdin: %s\n", strerror(errno));
+            exit(1);
+        }
+        if (nread == 0) return false;
+        nread--;
+        buffer[nread] = '\0';
+        for (ssize_t i = 0; i <= nread; i++) {
+            buffer[i] = tolower(buffer[i]);
+        }
+        if ((nread == 3 && streq(buffer, "yes")) || (nread == 1 && *buffer == 'y'))
+            return true;
+        else if ((nread == 2 && streq(buffer, "no")) || (nread == 1 && *buffer == 'n'))
+            return false;
+
+        printf("(y)es or (n)o?\n");
+    }
+    return false;
+}
+
+void print_no_todos_found(void)
+{
+    printf("There are no todos at `%s` ", todo_path);
+    if (tags.count > 0) {
+        printf("with tag%s ", tags.count == 1 ? "" : "s");
+        print_aos(tags);
+        printf("But there are:\n");
+        print_all_tags_from_todo_path();
+    }
+}
+
 bool command_show(void)
 {
-    bool show_all = false;
+    bool flag_show_all = false;
 
     bool flag_error = false;
     for (size_t i = 0; i < flags.count; i++) {
         char *flag = flags.items[i];
-        if (streq(flag, "a") || streq(flag, "all")) show_all = true;
+        if (streq(flag, "a") || streq(flag, "all")) flag_show_all = true;
         else {
             printf("ERROR: unknown flag `%s` for command show\n", flag);
             printf("TODO: print command usage\n");
@@ -553,15 +634,12 @@ bool command_show(void)
 
     Todos todos = {0};
     if (!get_all_todos(&todos)) return false;
-    size_ts indexes = get_todo_indexes(todos, show_all);
+    size_ts indexes = get_todo_indexes(todos, flag_show_all);
     if (indexes.count == 0) {
-        printf("There are no todos at `%s` ", todo_path);
-        if (tags.count > 0) {
-            printf("with tags ");
-            print_aos(tags);
-        }
+        print_no_todos_found();
         return true;
     }
+
     clear_screen();
     for (size_t i = 0; i < indexes.count; i++) {
         Todo t = todos.items[indexes.items[i]];
@@ -604,8 +682,8 @@ bool add_or_modify_todo(Todo *todo)
         if (tags.count == 1) {
             template_todo.tag = tags.items[0];
         } else if (tags.count > 1) {
-            printf("ERROR: at the moment only one tag at a time is supported\n");
-            printf("NOTE: tags: ");
+            printf("ERROR: at the moment only one tag at a time can be assigned to a todo\n");
+            printf("NOTE: you insrted: ");
             print_aos(tags);
             fclose(f);
             return false;
@@ -749,7 +827,8 @@ bool command_modify(void)
     if (!get_all_todos(&todos)) return false;
     size_ts indexes = get_todo_indexes(todos, modify_all);
     if (indexes.count == 0) {
-        printf("There are no todos to modify\n");
+        if (tags.count == 0) printf("There are no todos to modify at `%s`", todo_path);
+        else print_no_todos_found();
         return true;
     }
     clear_screen();
@@ -766,26 +845,6 @@ bool command_modify(void)
 
     printf("INFO: todo %d has been modified\n", index);
     return true;
-}
-
-bool ask_user_confirmation(void)
-{
-    while (true) {
-        char buffer[64] = {0};
-        size_t nread = read(STDIN_FILENO, buffer, sizeof(buffer));
-        nread--;
-        buffer[nread] = '\0';
-        for (size_t i = 0; i <= nread; i++) {
-            buffer[i] = tolower(buffer[i]);
-        }
-        if ((nread == 3 && streq(buffer, "yes")) || (nread == 1 && *buffer == 'y'))
-            return true;
-        else if ((nread == 2 && streq(buffer, "no")) || (nread == 1 && *buffer == 'n'))
-            return false;
-
-        printf("(y)es or (n)o?\n");
-    }
-    return false;
 }
 
 bool command_complete(void)
@@ -810,7 +869,8 @@ bool command_complete(void)
     while (true) {
         size_ts indexes = get_todo_indexes(todos, !ALL);
         if (indexes.count == 0) {
-            printf("All todos are completed\n");
+            if (tags.count == 0) printf("All todos are completed at `%s`", todo_path);
+            else print_no_todos_found();
             return true;
         }
         clear_screen();
@@ -849,6 +909,13 @@ bool clear_todo_file(void)
     fclose(f);
     printf("Todo file `%s` has been cleared\n", todo_path);
     return true;
+}
+
+void todo_remove(Todos *todos, size_t index)
+{
+    Todo *t = &todos->items[index];
+    todo_free(t); 
+    da_remove(todos, index);
 }
 
 bool command_delete(void)
@@ -909,7 +976,7 @@ bool command_delete(void)
                     i++;
                     continue;
                 }
-                da_remove(&todos, i);
+                todo_remove(&todos, i);
             } else i++;
         }
         size_t count_after = todos.count;
@@ -930,7 +997,8 @@ bool command_delete(void)
     while (true) {
         size_ts indexes = get_todo_indexes(todos, select_from_all);
         if (indexes.count == 0) {
-            printf("There are no todos to delete\n");
+            if (tags.count == 0) printf("There are no todos at `%s`", todo_path);
+            else print_no_todos_found();
             return true;
         }
         clear_screen();
@@ -943,7 +1011,7 @@ bool command_delete(void)
         int index;
         if (!get_todo_index_from_user(&index, indexes.count, "delete")) return false;
 
-        da_remove(&todos, indexes.items[index]);
+        todo_remove(&todos, indexes.items[index]);
 
         if (!save_todos_to_file(todos)) return false;
 
@@ -982,6 +1050,7 @@ int main(int argc, char **argv)
                 char *path = argv[i+1];
                 if (!check_valid_todo_path(path)) return 1;
                 else {
+                    free(todo_path);
                     todo_path = path;
                     todo_path_is_custom = true;
                     i++;
