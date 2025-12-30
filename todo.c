@@ -7,6 +7,7 @@
 #include <stdarg.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <sys/wait.h>
 
 #include "dynamic_arrays.h"
 
@@ -683,7 +684,7 @@ bool add_or_modify_todo(Todo *todo)
             template_todo.tag = tags.items[0];
         } else if (tags.count > 1) {
             printf("ERROR: at the moment only one tag at a time can be assigned to a todo\n");
-            printf("NOTE: you insrted: ");
+            printf("NOTE: you inserted: ");
             print_aos(tags);
             fclose(f);
             return false;
@@ -693,9 +694,25 @@ bool add_or_modify_todo(Todo *todo)
     fprintf(f, "Any text inserted after the second line will be ignored\n");
     fclose(f);
 
-    char cmd[256] = {0};
-    sprintf(cmd, "$EDITOR %s", tmp_todo_filename);
-    system(cmd);
+    char *cmd[3] = {0};
+    char *editor = getenv("EDITOR");
+    if (!editor) editor = "vi";
+    cmd[0] = editor;
+    cmd[1] = tmp_todo_filename;
+
+    pid_t child = fork();
+    switch (child)
+    {
+    case -1:
+        printf("ERROR: could not create child process to open editor\n");
+        return false;
+    case 0:
+        execvp(editor, cmd);
+        exit(0);
+    default:
+        waitpid(child, NULL, 0);
+    }
+
     char *content = read_file(tmp_todo_filename);
     remove(tmp_todo_filename);
     if (!content) {
