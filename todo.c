@@ -1046,7 +1046,7 @@ bool command_delete(void)
     abort();
 }
 
-int main(int argc, char **argv)
+bool setup(int argc, char **argv)
 {
     program_name = argv[0];
 
@@ -1057,15 +1057,15 @@ int main(int argc, char **argv)
             char *flag = arg;
             if (!*flag) {
                 printf("ERROR: flag without name (lonely dash)\n");
-                return 1;
+                return false;
             }
             if (streq(flag, "path") || streq(flag, "p")) {
                 if (i+1 >= argc) {
                     printf("ERROR: expected path after flag -path, but got nothing\n");
-                    return 1;
+                    return false;
                 }
                 char *path = argv[i+1];
-                if (!check_valid_todo_path(path)) return 1;
+                if (!check_valid_todo_path(path)) return false;
                 else {
                     free(todo_path);
                     todo_path = path;
@@ -1079,7 +1079,7 @@ int main(int argc, char **argv)
             arg++;
             if (!*arg) {
                 printf("ERROR: tag without name (lonely at)\n");
-                return 1;
+                return false;
             }
             da_push(&tags, arg);
         } else {
@@ -1088,8 +1088,15 @@ int main(int argc, char **argv)
     }
 
     if (todo_path == NULL) {
-        if (!set_default_todo_path()) return 1;
+        if (!set_default_todo_path()) return false;
     }
+
+    return true;
+}
+
+int main(int argc, char **argv)
+{
+    if (!setup(argc, argv)) return 1;
 
     Command command = CMD_SHOW;
     if (args.count > 0) {
