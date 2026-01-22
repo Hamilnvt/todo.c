@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <sys/wait.h>
+#include <limits.h>
 
 #include "dynamic_arrays.h"
 
@@ -17,27 +18,168 @@
         goto defer;         \
     } while (0)
 
+typedef struct
+{
+    char *name;
+    char *path;
+} Path;
+
+typedef struct
+{
+    Path *items;
+    size_t count;
+    size_t capacity;
+} Paths;
+
 #define FILE_EXTENSION "td"
+static char *home_path = NULL;
+static char *todo_dir_path = NULL;
+static char *default_todo_path = NULL;
 static char *todo_path = NULL;
+static char *paths_path = NULL;
+static Paths paths = {0};
 static bool todo_path_is_custom = false;
-static char tmp_todo_filename[64] = "/tmp/todo_XXXXXX";
+static char tmp_todo_filename[] = "/tmp/todo_XXXXXX";
 #define DIVIDER_STR "----------"
 #define DIVIDER_STR_WITH_NL DIVIDER_STR"\n"
 
-bool set_default_todo_path(void)
+bool set_home_path(void)
 {
-    const char *home = getenv("HOME");
-    if (!home) {
+    home_path = getenv("HOME");
+    if (!home_path) {
         printf("ERROR: could not get environment variable `HOME`\n");
         return false;
     }
-    char path[1024];
-    snprintf(path, sizeof(path), "%s/.all.td", home);
-    const size_t len = strlen(path);
-    todo_path = malloc(sizeof(char)*(len+1));
-    strncpy(todo_path, path, len);
-    todo_path[len] = '\0';
     return true;
+}
+
+void set_todo_dir_path(void)
+{
+    char path_buffer[PATH_MAX + 1];
+    snprintf(path_buffer, sizeof(path_buffer), "%s/.todo", home_path);
+    size_t len = strlen(path_buffer);
+    todo_dir_path = malloc(sizeof(char)*(len+1));
+    strncpy(todo_dir_path, path_buffer, len);
+    todo_dir_path[len] = '\0';
+}
+
+void set_default_todo_path(void)
+{
+    char path_buffer[PATH_MAX + 1];
+    snprintf(path_buffer, sizeof(path_buffer), "%s/all.td", todo_dir_path);
+    size_t len = strlen(path_buffer);
+    default_todo_path = malloc(sizeof(char)*(len+1));
+    strncpy(default_todo_path, path_buffer, len);
+    default_todo_path[len] = '\0';
+
+    todo_path = default_todo_path;
+}
+
+void set_paths_path(void)
+{
+    char paths_buffer[PATH_MAX + 1];
+    snprintf(paths_buffer, sizeof(paths_buffer), "%s/paths", todo_dir_path);
+    size_t len = strlen(paths_buffer);
+    paths_path = malloc(sizeof(char)*(len+1));
+    strncpy(paths_path, paths_buffer, len);
+    paths_path[len] = '\0';
+}
+
+bool get_paths(void)
+{
+    struct stat st;
+    if (stat(paths_path, &st) != 0) {
+        printf("ERROR: could not stat file at `%s`: %s\n", paths_path, strerror(errno));
+        return false;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        printf("ERROR: `%s` is a directory, not a file\n", paths_path);
+        return false;
+    }
+
+    FILE *f = fopen(paths_path, "r");
+    if (!f) {
+        printf("ERROR: could not open file at `%s`: %s\n", paths_path, strerror(errno));
+        return false;
+    }
+
+    char *_line = NULL;
+    char *line;
+    size_t len = 0;
+    ssize_t nread;
+    bool error = false;
+    size_t n = 0;
+    while ((nread = getline(&_line, &len, f)) != -1) {
+        line = _line;
+        n++;
+        while (line && *line != '\n' && isblank(*line)) line++;
+        if (!line || *line == '\n') continue;
+        char *name = line;
+        char *name_end = NULL;
+        if (*line == '"') {
+            name++;
+            line++;
+            while (line && *line != '\n' && *line != '"') line++;
+            if (!line || *line == '\n') {
+                printf("ERROR: unclosed string (paths line %zu)\n", n);
+                error = true;
+                continue;
+            }
+            name_end = line;
+            line++;
+        } else {
+            while (line && !isspace(*line)) line++;
+            name_end = line;
+        }
+        ptrdiff_t name_len = name_end - name;
+        while (line && *line != '\n' && isblank(*line)) line++;
+        if (!line || *line == '\n') {
+            printf("ERROR: name `%.*s` without path (paths line %zu)\n", (int)name_len, name, n);
+            error = true;
+            continue;
+        }
+        char *path = line;
+        while (line && *line && *line != '\n') line++;
+        *line = '\0';
+
+        char expanded_path[PATH_MAX + 1] = {0};
+        if (path[0] == '~' && (path[1] == '/' || path[1] == '\0')) {
+            snprintf(expanded_path, sizeof(expanded_path), "%s/%s", home_path, path+1);
+            path = expanded_path;
+        }
+
+        char path_buf[PATH_MAX + 1] = {0};
+        char cwd[PATH_MAX+1];
+        if (!getcwd(cwd, sizeof(cwd))) {
+            printf("ERROR: could not get current working directory: %s\n", strerror(errno));
+            return false;
+        }
+
+        if (chdir(todo_dir_path) == -1) {
+            printf("ERROR: could not change working directory to %s: %s\n", todo_dir_path, strerror(errno));
+            return false;
+        }
+
+        if (!realpath(path, path_buf)) {
+            printf("ERROR: path `%s` does not exist (paths line %zu)\n", path, n);
+            error = true;
+            continue;
+        }
+
+        if (chdir(cwd) == -1) {
+            printf("ERROR: could not restore current working directory %s: %s\n", cwd, strerror(errno));
+            return false;
+        }
+
+        Path parsed_path = {
+            .name = strndup(name, name_len),
+            .path = strdup(path_buf)
+        };
+        da_push(&paths, parsed_path);
+    }
+    free(_line);
+    fclose(f);
+    return !error;
 }
 
 #define ANSI_CLEAR_SCREEN "\x1b[2J"
@@ -80,6 +222,7 @@ typedef enum
     CMD_COMPLETE,
     CMD_DELETE,
     CMD_MODIFY,
+    CMD_ADDPATH,
     CMD_HELP,
     CMD_UNKNOWN,
     CMDS_COUNT
@@ -320,8 +463,7 @@ bool parse_todos(char *content, Todos *todos)
 static char *program_name = NULL;
 void usage(void)
 {
-    // TODO: commands and flags
-    printf("usage: %s\n", program_name);
+    printf("usage: %s command\n", program_name);
 }
 
 void info(void)
@@ -330,7 +472,7 @@ void info(void)
     usage();
 }
 
-static_assert(CMDS_COUNT == 7, "Get all commands to cstr in command_to_cstr");
+static_assert(CMDS_COUNT == 8, "Get all commands to cstr in command_to_cstr");
 char *command_to_cstr(Command cmd)
 {
     switch (cmd)
@@ -340,6 +482,7 @@ char *command_to_cstr(Command cmd)
     case CMD_COMPLETE: return "complete";
     case CMD_DELETE:   return "delete";
     case CMD_MODIFY:   return "modify";
+    case CMD_ADDPATH:  return "addpath";
     case CMD_HELP:     return "help";
     case CMD_UNKNOWN:  return "unknown";
     case CMDS_COUNT:
@@ -349,18 +492,19 @@ char *command_to_cstr(Command cmd)
     }
 }
 
-static_assert(CMDS_COUNT == 7, "Get all commands info in info_of");
+static_assert(CMDS_COUNT == 8, "Get all commands info in info_of");
 const char *info_of(Command cmd)
 {
     switch (cmd)
     {
-    case CMD_SHOW:     return "print pending todos in `path` to stdout";
-    case CMD_ADD:      return "TODO: info add";
-    case CMD_COMPLETE: return "TODO: info complete";
-    case CMD_DELETE:   return "TODO: info delete";
-    case CMD_MODIFY:   return "TODO: info modify";
-    case CMD_HELP:     return "TODO: info help";
-    case CMD_UNKNOWN:  return "TODO: info unknown";
+    case CMD_SHOW:     return "print todos to stdout";
+    case CMD_ADD:      return "add todo";
+    case CMD_COMPLETE: return "complete todo";
+    case CMD_DELETE:   return "delete todo";
+    case CMD_MODIFY:   return "modify todo";
+    case CMD_ADDPATH:  return "add path with a name to paths file";
+    case CMD_HELP:     return "show help for `command`";
+    case CMD_UNKNOWN:
     case CMDS_COUNT:
     default:
         printf("Unreachable command in info_of\n");
@@ -368,54 +512,67 @@ const char *info_of(Command cmd)
     }
 }
 
-static_assert(CMDS_COUNT == 7, "Get all commands info in usage_of");
-const char *usage_of(Command cmd)
+static_assert(CMDS_COUNT == 8, "Get all commands info in usage_of");
+char *usage_of(Command cmd)
 {
+    char *usage_msg = malloc(sizeof(char)*1024);
+    usage_msg = memset(usage_msg, 0, sizeof(char)*1024);
+
+    strcat(usage_msg, program_name);
+    strcat(usage_msg, " ");
     switch (cmd)
     {
-    case CMD_SHOW:     return "todo [show] [path]";
-    case CMD_ADD:      return "TODO: usage add";
-    case CMD_COMPLETE: return "TODO: usage complete";
-    case CMD_DELETE:   return "TODO: usage delete";
-    case CMD_MODIFY:   return "TODO: usage modify";
-    case CMD_HELP:     return "TODO: usage help";
-    case CMD_UNKNOWN:  return "TODO: usage unknown";
+    case CMD_SHOW:     return strcat(usage_msg, "[show] [tags..] [flags..]");
+    case CMD_ADD:      return strcat(usage_msg, "add [tags..] [flags..]");
+    case CMD_COMPLETE: return strcat(usage_msg, "(com)plete [tags..] [flags..]");
+    case CMD_DELETE:   return strcat(usage_msg, "(del)ete [tags..] [flags..]");
+    case CMD_MODIFY:   return strcat(usage_msg, "(mod)ify [tags..] [flags..]");
+    case CMD_ADDPATH:  return strcat(usage_msg, "addpath <name> <path>");
+    case CMD_HELP:     return strcat(usage_msg, "(h)elp <command>");
+    case CMD_UNKNOWN:
     case CMDS_COUNT:
     default:
-        printf("Unreachable command in usage_of\n");
+        printf("Unreachable command in usage_msg_of\n");
         abort();
     }
+    return usage_msg;
 }
 
-static_assert(CMDS_COUNT == 7, "Get all commands info in flags_of");
+static_assert(CMDS_COUNT == 8, "Get all commands info in flags_of");
 const char *flags_of(Command cmd)
 {
+    char *flags_msg = malloc(sizeof(char)*1024);
+    memset(flags_msg, 0, sizeof(char)*1024);
+
     switch (cmd)
     {
-    case CMD_SHOW:     return "-all                also print completed todos\n";
-    case CMD_ADD:      return "TODO: flags add";
-    case CMD_COMPLETE: return "TODO: flags complete";
-    case CMD_DELETE:   return "TODO: flags delete";
-    case CMD_MODIFY:   return "TODO: flags modify";
-    case CMD_HELP:     return "TODO: flags help";
-    case CMD_UNKNOWN:  return "TODO: flags unknown";
+    case CMD_SHOW:     strcat(flags_msg, "-(a)ll                       also print completed todos\n"\
+                                         "-(p)ath <path>               print todos in `path`. ");
+                       strcat(flags_msg, "Default is ");
+                       strcat(flags_msg, default_todo_path);
+                       break;
+    case CMD_ADD:      return "no flags for command 'add'";
+    case CMD_COMPLETE: return "-(a)ll                also choose among completed todos\n";
+
+    case CMD_DELETE:   return "-(a)ll                      also choose among completed todos\n"           \
+                              "-(A)LL                      delete ALL todos (with specified `tags`)\n"    \
+                              "-(c)ompleted                delete completed todos (with specified `tags`)";
+
+    case CMD_MODIFY:   return "-(a)ll                also choose among completed todos\n";
+    case CMD_ADDPATH:  return "no flags for command addpath";
+    case CMD_HELP:     return "no flags for command 'help'";
+    case CMD_UNKNOWN:
     case CMDS_COUNT:
     default:
         printf("Unreachable command in flags_of\n");
         abort();
     }
+
+    return flags_msg;
 }
 
 void help_of(Command cmd)
 {
-    if (cmd == CMD_UNKNOWN) {
-        printf("ERROR: unknown command\n");
-        return;
-    } else if (cmd < 0 || cmd >= CMDS_COUNT) {
-        printf("Unreachable command in help_of\n");
-        abort();
-    }
-
     printf("Command %s:\n", command_to_cstr(cmd));
 
     printf_indent(4, "info:\n");
@@ -428,7 +585,7 @@ void help_of(Command cmd)
     printf_indent(8, "%s\n", flags_of(cmd));
 }
 
-static_assert(CMDS_COUNT == 7, "Get all commands from string in get_command");
+static_assert(CMDS_COUNT == 8, "Get all commands from string in get_command");
 Command get_command(char *str)
 {
          if (streq(str, "show"))                          return CMD_SHOW;
@@ -436,7 +593,8 @@ Command get_command(char *str)
     else if (streq(str, "complete") || streq(str, "com")) return CMD_COMPLETE;
     else if (streq(str, "delete")   || streq(str, "del")) return CMD_DELETE;
     else if (streq(str, "modify")   || streq(str, "mod")) return CMD_MODIFY;
-    else if (streq(str, "help"))                          return CMD_HELP;
+    else if (streq(str, "addpath"))                       return CMD_ADDPATH;
+    else if (streq(str, "help")     || streq(str, "h"))   return CMD_HELP;
     else                                                  return CMD_UNKNOWN;
 }
 
@@ -456,11 +614,15 @@ bool command_help(void)
         help_of(CMD_HELP);
         return false;
     } else if (args.count == 0) {
-        help_of(CMD_HELP);
+        for (Command cmd = 0; cmd < CMDS_COUNT; cmd++) {
+            if (cmd == CMD_UNKNOWN) continue;
+            help_of(cmd);
+            printf("\n");
+        }
     } else {
         Command cmd = get_command(args.items[0]);
         if (cmd == CMD_UNKNOWN) {
-            printf("ERROR: unknown command  `%s`\n", args.items[0]);
+            printf("ERROR: unknown command `%s`\n", args.items[0]);
             return false;
         }
         help_of(cmd);
@@ -611,6 +773,68 @@ void print_no_todos_found(void)
     }
 }
 
+bool command_addpath(void)
+{
+    bool flag_error = false;
+    for (size_t i = 0; i < flags.count; i++) {
+        char *flag = flags.items[i];
+        printf("ERROR: unknown flag `%s` for command addpath\n", flag);
+        flag_error = true;
+    }
+    if (flag_error) {
+        puts(flags_of(CMD_ADDPATH));
+        return false;
+    }
+
+    if (args.count != 2) {
+        printf("ERROR: incorrect number of arguments for command addpath, expecting 2 but got %zu\n", args.count);
+        printf("USAGE: %s\n", usage_of(CMD_ADDPATH));
+        return false;
+    }
+
+    struct stat st;
+    if (stat(paths_path, &st) != 0) {
+        if (errno == ENOENT) {
+            FILE *f = fopen(paths_path, "w");
+            if (!f) {
+                printf("ERROR: could not create paths file at `%s`: %s\n", paths_path, strerror(errno));
+                return false;
+            } else {
+                printf("INFO: paths file created at `%s`\n", paths_path);
+                fclose(f);
+            }
+        } else {
+            printf("ERROR: could not stat file at `%s`: %s\n", paths_path, strerror(errno));
+            return false;
+        }
+    }
+
+    if (S_ISDIR(st.st_mode)) {
+        printf("ERROR: `%s` should be a file but is a directory\n", paths_path);
+        return false;
+    }
+
+    FILE *f = fopen(paths_path, "a");
+    if (!f) {
+        printf("ERROR: could not open file at `%s`: %s\n", paths_path, strerror(errno));
+        return false;
+    }
+
+    char *name = args.items[0];
+    char *path = args.items[1];
+
+    // TODO: check if path is valid
+
+    bool has_spaces = strpbrk(name, " \t") != NULL;
+    if (has_spaces) fprintf(f, "\"");
+    fprintf(f, "%s", name);
+    if (has_spaces) fprintf(f, "\"");
+    fprintf(f, " %s\n", path);
+    fclose(f);
+
+    return true;
+}
+
 bool command_show(void)
 {
     bool flag_show_all = false;
@@ -621,11 +845,13 @@ bool command_show(void)
         if (streq(flag, "a") || streq(flag, "all")) flag_show_all = true;
         else {
             printf("ERROR: unknown flag `%s` for command show\n", flag);
-            printf("TODO: print command usage\n");
             flag_error = true;
         }
     }
-    if (flag_error) return false;
+    if (flag_error) {
+        puts(flags_of(CMD_SHOW));
+        return false;
+    }
 
     if (args.count > 0) {
         printf("ERROR: too many arguments for command show\n");
@@ -1087,9 +1313,19 @@ bool setup(int argc, char **argv)
         }
     }
 
-    if (todo_path == NULL) {
-        if (!set_default_todo_path()) return false;
+    if (!set_home_path()) return false;
+    set_todo_dir_path();
+    if (todo_path == NULL) set_default_todo_path();
+    set_paths_path();
+    if (!get_paths()) {
+        if (errno != ENOENT) return false;
+        else {
+            // TODO: create now paths file and don't report error in get_paths if not found
+        }
     }
+    printf("Paths:\n");
+    da_foreach (paths, Path, path) printf("- %s -> %s\n", path->name, path->path);
+    printf("\n");
 
     return true;
 }
@@ -1106,7 +1342,7 @@ int main(int argc, char **argv)
 
     bool result = true;
 
-    static_assert(CMDS_COUNT == 7, "Switch all commands in main");
+    static_assert(CMDS_COUNT == 8, "Switch all commands in main");
     switch (command)
     {
         case CMD_SHOW:     result = command_show();     break;
@@ -1114,6 +1350,7 @@ int main(int argc, char **argv)
         case CMD_COMPLETE: result = command_complete(); break;
         case CMD_DELETE:   result = command_delete();   break;
         case CMD_MODIFY:   result = command_modify();   break;
+        case CMD_ADDPATH:  result = command_addpath();  break;
         case CMD_HELP:     result = command_help();     break;
         case CMD_UNKNOWN: {
             printf("ERROR: unknown command `%s`\n", args.items[0]);
