@@ -31,7 +31,7 @@ typedef struct
     size_t capacity;
 } Paths;
 
-#define FILE_EXTENSION "td"
+#define TODO_FILE_EXTENSION "td"
 static char *home_path = NULL;
 static char *todo_dir_path = NULL;
 static char *default_todo_path = NULL;
@@ -85,14 +85,39 @@ void set_paths_path(void)
     paths_path[len] = '\0';
 }
 
-bool get_paths(void)
+bool does_file_exist(char *path)
 {
+    if (!path) return false;
     struct stat st;
-    if (stat(paths_path, &st) != 0) {
+    return stat(path, &st) == 0;
+}
+
+bool is_directory(char *path)
+{
+    if (!path) return false;
+    struct stat st;
+    if (stat(path, &st) != 0) return false;
+    return S_ISDIR(st.st_mode);
+}
+
+bool can_get_paths(void)
+{
+    if (!does_file_exist(paths_path)) return false;
+    if (is_directory(paths_path)) return false;
+    FILE *f = fopen(paths_path, "r");
+    if (!f) return false;
+    else fclose(f);
+    return true;
+}
+
+bool try_get_paths_and_report_error(void)
+{
+    if (!does_file_exist(paths_path)) {
         printf("ERROR: could not stat file at `%s`: %s\n", paths_path, strerror(errno));
         return false;
     }
-    if (S_ISDIR(st.st_mode)) {
+
+    if (is_directory(paths_path)) {
         printf("ERROR: `%s` is a directory, not a file\n", paths_path);
         return false;
     }
@@ -149,26 +174,10 @@ bool get_paths(void)
         }
 
         char path_buf[PATH_MAX + 1] = {0};
-        char cwd[PATH_MAX+1];
-        if (!getcwd(cwd, sizeof(cwd))) {
-            printf("ERROR: could not get current working directory: %s\n", strerror(errno));
-            return false;
-        }
-
-        if (chdir(todo_dir_path) == -1) {
-            printf("ERROR: could not change working directory to %s: %s\n", todo_dir_path, strerror(errno));
-            return false;
-        }
-
         if (!realpath(path, path_buf)) {
             printf("ERROR: path `%s` does not exist (paths line %zu)\n", path, n);
             error = true;
             continue;
-        }
-
-        if (chdir(cwd) == -1) {
-            printf("ERROR: could not restore current working directory %s: %s\n", cwd, strerror(errno));
-            return false;
         }
 
         Path parsed_path = {
@@ -631,23 +640,37 @@ bool command_help(void)
     return true;
 }
 
-bool check_valid_todo_path(char *path)
+bool does_file_have_todo_extension(char *path)
+{
+    char *point = strrchr(path, '.');
+    return (point++ && streq(point, TODO_FILE_EXTENSION));
+}
+
+bool is_valid_todo_path(char *path)
+{
+    if (!path) return false;
+    if (!does_file_exist(path)) return false;
+    if (is_directory(path)) return false;
+    if (!does_file_have_todo_extension(path)) return false; 
+    return true;
+}
+
+bool check_is_valid_todo_path_and_report_error(char *path)
 {
     if (!path) return false;
 
-    struct stat st;
-    if (stat(path, &st) != 0) {
+    if (!does_file_exist(path)) {
         printf("ERROR: could not stat file at `%s`: %s\n", path, strerror(errno));
         return false;
     }
-    if (S_ISDIR(st.st_mode)) {
+
+    if (is_directory(path)) {
         printf("ERROR: `%s` is a directory, not a file\n", path);
         return false;
     }
 
-    char *point = strrchr(path, '.');
-    if (!point++ || !streq(point, FILE_EXTENSION)) {
-        printf("ERROR: file `%s` has no extension `%s`\n", path, FILE_EXTENSION);
+    if (!does_file_have_todo_extension(path)) {
+        printf("ERROR: file `%s` has not extension `%s`\n", path, TODO_FILE_EXTENSION);
         return false; 
     }
 
@@ -764,11 +787,11 @@ bool ask_user_confirmation(void)
 
 void print_no_todos_found(void)
 {
-    printf("There are no todos at `%s` ", todo_path);
+    printf("INFO: There are no todos at `%s` ", todo_path);
     if (tags.count > 0) {
         printf("with tag%s ", tags.count == 1 ? "" : "s");
         print_aos(tags);
-        printf("But there are:\n");
+        printf("INFO: But there are:\n");
         print_all_tags_from_todo_path();
     }
 }
@@ -792,8 +815,7 @@ bool command_addpath(void)
         return false;
     }
 
-    struct stat st;
-    if (stat(paths_path, &st) != 0) {
+    if (!does_file_exist(paths_path)) {
         if (errno == ENOENT) {
             FILE *f = fopen(paths_path, "w");
             if (!f) {
@@ -809,7 +831,7 @@ bool command_addpath(void)
         }
     }
 
-    if (S_ISDIR(st.st_mode)) {
+    if (is_directory(paths_path)) {
         printf("ERROR: `%s` should be a file but is a directory\n", paths_path);
         return false;
     }
@@ -823,7 +845,16 @@ bool command_addpath(void)
     char *name = args.items[0];
     char *path = args.items[1];
 
-    // TODO: check if path is valid
+    bool path_error = !check_is_valid_todo_path_and_report_error(path);
+    da_foreach (paths, Path, p) {
+        if (streq(p->name, name)) {
+            printf("ERROR: redefinition of path `%s`\n", name);
+            printf("NOTE: bound to `%s`\n", p->path);
+            path_error = true;
+            break;
+        }
+    }
+    if (path_error) return false;
 
     bool has_spaces = strpbrk(name, " \t") != NULL;
     if (has_spaces) fprintf(f, "\"");
@@ -831,6 +862,8 @@ bool command_addpath(void)
     if (has_spaces) fprintf(f, "\"");
     fprintf(f, " %s\n", path);
     fclose(f);
+
+    printf("INFO: Added path: `%s` -> %s\n", name, path);
 
     return true;
 }
@@ -1070,7 +1103,7 @@ bool command_modify(void)
     if (!get_all_todos(&todos)) return false;
     size_ts indexes = get_todo_indexes(todos, modify_all);
     if (indexes.count == 0) {
-        if (tags.count == 0) printf("There are no todos to modify at `%s`", todo_path);
+        if (tags.count == 0) printf("INFO: There are no todos to modify at `%s`", todo_path);
         else print_no_todos_found();
         return true;
     }
@@ -1112,7 +1145,7 @@ bool command_complete(void)
     while (true) {
         size_ts indexes = get_todo_indexes(todos, !ALL);
         if (indexes.count == 0) {
-            if (tags.count == 0) printf("All todos are completed at `%s`", todo_path);
+            if (tags.count == 0) printf("INFO: All todos are completed at `%s`", todo_path);
             else print_no_todos_found();
             return true;
         }
@@ -1131,7 +1164,7 @@ bool command_complete(void)
         printf("INFO: todo %d has been marked as completed\n", index);
 
         if (indexes.count-1 == 0) {
-            printf("\nThere are no todos left to complete\n");
+            printf("\nINFO: There are no todos left to complete\n");
             return true;
         }
 
@@ -1150,7 +1183,7 @@ bool clear_todo_file(void)
         return false;
     }
     fclose(f);
-    printf("Todo file `%s` has been cleared\n", todo_path);
+    printf("INFO: Todo file `%s` has been cleared\n", todo_path);
     return true;
 }
 
@@ -1226,21 +1259,21 @@ bool command_delete(void)
 
         if (!save_todos_to_file(todos)) return false;
 
-        printf("Deleted %zu todos\n", count_before - count_after + 1);
+        printf("INFO: Deleted %zu todos\n", count_before - count_after + 1);
         return true;
     }
 
     Todos todos = {0};
     if (!get_all_todos(&todos)) return false;
     if (todos.count == 0) {
-        printf("There are no todos to delete\n");
+        printf("INFO: There are no todos to delete\n");
         return true;
     }
 
     while (true) {
         size_ts indexes = get_todo_indexes(todos, select_from_all);
         if (indexes.count == 0) {
-            if (tags.count == 0) printf("There are no todos at `%s`", todo_path);
+            if (tags.count == 0) printf("INFO: There are no todos at `%s`", todo_path);
             else print_no_todos_found();
             return true;
         }
@@ -1261,7 +1294,7 @@ bool command_delete(void)
         printf("INFO: todo %d has been deleted\n", index);
 
         if (indexes.count-1 == 0) {
-            printf("\nThere are no todos left to delete\n");
+            printf("\nINFO: There are no todos left to delete\n");
             return true;
         }
 
@@ -1274,6 +1307,12 @@ bool command_delete(void)
 
 bool setup(int argc, char **argv)
 {
+    if (!set_home_path()) return false;
+    set_todo_dir_path();
+
+    set_paths_path();
+    if (can_get_paths()) try_get_paths_and_report_error();
+
     program_name = argv[0];
 
     for (int i = 1; i < argc; i++) {
@@ -1286,17 +1325,43 @@ bool setup(int argc, char **argv)
                 return false;
             }
             if (streq(flag, "path") || streq(flag, "p")) {
+                free(todo_path);
+                todo_path_is_custom = true;
                 if (i+1 >= argc) {
                     printf("ERROR: expected path after flag -path, but got nothing\n");
                     return false;
                 }
-                char *path = argv[i+1];
-                if (!check_valid_todo_path(path)) return false;
-                else {
-                    free(todo_path);
+                i++;
+                char *path = argv[i];
+                if (is_valid_todo_path(path)) {
                     todo_path = path;
-                    todo_path_is_custom = true;
-                    i++;
+                    continue;
+                }
+                if (!can_get_paths()) {
+                    printf("ERROR: path `%s` is not a todo path\n", path);
+                    check_is_valid_todo_path_and_report_error(path);
+                    printf("ERROR: Moreover, could not reach paths file at `%s`\n", paths_path);
+                    try_get_paths_and_report_error();
+                    printf("NOTE: you can create the file and add a path with command `addpath`\n");
+                    return false;
+                }
+                bool found = false;
+                da_foreach (paths, Path, p) {
+                    if (streq(path, p->name)) {
+                        found = true;
+                        todo_path = p->path;
+                        break;
+                    }
+                }
+                if (!found) {
+                    printf("ERROR: Could not find an associated path to `%s`\n", path);
+                    if (da_is_empty(&paths)) {
+                        printf("NOTE: there aren't any paths registered at `%s`:\n", paths_path);
+                    } else {
+                        printf("NOTE: Here are the registered paths at `%s`:\n", paths_path);
+                        da_foreach (paths, Path, p) printf("- %s -> %s\n", p->name, p->path);
+                    }
+                    return false;
                 }
             } else {
                 da_push(&flags, flag);
@@ -1313,19 +1378,7 @@ bool setup(int argc, char **argv)
         }
     }
 
-    if (!set_home_path()) return false;
-    set_todo_dir_path();
     if (todo_path == NULL) set_default_todo_path();
-    set_paths_path();
-    if (!get_paths()) {
-        if (errno != ENOENT) return false;
-        else {
-            // TODO: create now paths file and don't report error in get_paths if not found
-        }
-    }
-    printf("Paths:\n");
-    da_foreach (paths, Path, path) printf("- %s -> %s\n", path->name, path->path);
-    printf("\n");
 
     return true;
 }
