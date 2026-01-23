@@ -233,6 +233,7 @@ typedef enum
     CMD_MODIFY,
     CMD_ADDPATH,
     CMD_HELP,
+    CMD_PRINT,
     CMD_UNKNOWN,
     CMDS_COUNT
 } Command;
@@ -481,7 +482,7 @@ void info(void)
     usage();
 }
 
-static_assert(CMDS_COUNT == 8, "Get all commands to cstr in command_to_cstr");
+static_assert(CMDS_COUNT == 9, "Get all commands to cstr in command_to_cstr");
 char *command_to_cstr(Command cmd)
 {
     switch (cmd)
@@ -493,6 +494,7 @@ char *command_to_cstr(Command cmd)
     case CMD_MODIFY:   return "modify";
     case CMD_ADDPATH:  return "addpath";
     case CMD_HELP:     return "help";
+    case CMD_PRINT:    return "print";
     case CMD_UNKNOWN:  return "unknown";
     case CMDS_COUNT:
     default:
@@ -501,7 +503,7 @@ char *command_to_cstr(Command cmd)
     }
 }
 
-static_assert(CMDS_COUNT == 8, "Get all commands info in info_of");
+static_assert(CMDS_COUNT == 9, "Get all commands info in info_of");
 const char *info_of(Command cmd)
 {
     switch (cmd)
@@ -513,6 +515,7 @@ const char *info_of(Command cmd)
     case CMD_MODIFY:   return "modify todo";
     case CMD_ADDPATH:  return "add path with a name to paths file";
     case CMD_HELP:     return "show help for `command`";
+    case CMD_PRINT:    return "print `info`";
     case CMD_UNKNOWN:
     case CMDS_COUNT:
     default:
@@ -521,7 +524,7 @@ const char *info_of(Command cmd)
     }
 }
 
-static_assert(CMDS_COUNT == 8, "Get all commands info in usage_of");
+static_assert(CMDS_COUNT == 9, "Get all commands info in usage_of");
 char *usage_of(Command cmd)
 {
     char *usage_msg = malloc(sizeof(char)*1024);
@@ -538,6 +541,7 @@ char *usage_of(Command cmd)
     case CMD_MODIFY:   return strcat(usage_msg, "(mod)ify [tags..] [flags..]");
     case CMD_ADDPATH:  return strcat(usage_msg, "addpath <name> <path>");
     case CMD_HELP:     return strcat(usage_msg, "(h)elp <command>");
+    case CMD_PRINT:    return strcat(usage_msg, "print <info> [-path <path>]");
     case CMD_UNKNOWN:
     case CMDS_COUNT:
     default:
@@ -547,7 +551,7 @@ char *usage_of(Command cmd)
     return usage_msg;
 }
 
-static_assert(CMDS_COUNT == 8, "Get all commands info in flags_of");
+static_assert(CMDS_COUNT == 9, "Get all commands info in flags_of");
 const char *flags_of(Command cmd)
 {
     char *flags_msg = malloc(sizeof(char)*1024);
@@ -570,6 +574,7 @@ const char *flags_of(Command cmd)
     case CMD_MODIFY:   return "-(a)ll                also choose among completed todos\n";
     case CMD_ADDPATH:  return "no flags for command addpath";
     case CMD_HELP:     return "no flags for command 'help'";
+    case CMD_PRINT:    return "-(p)ath <path>               print `info` based on `path`";
     case CMD_UNKNOWN:
     case CMDS_COUNT:
     default:
@@ -594,7 +599,7 @@ void help_of(Command cmd)
     printf_indent(8, "%s\n", flags_of(cmd));
 }
 
-static_assert(CMDS_COUNT == 8, "Get all commands from string in get_command");
+static_assert(CMDS_COUNT == 9, "Get all commands from string in get_command");
 Command get_command(char *str)
 {
          if (streq(str, "show"))                          return CMD_SHOW;
@@ -604,6 +609,7 @@ Command get_command(char *str)
     else if (streq(str, "modify")   || streq(str, "mod")) return CMD_MODIFY;
     else if (streq(str, "addpath"))                       return CMD_ADDPATH;
     else if (streq(str, "help")     || streq(str, "h"))   return CMD_HELP;
+    else if (streq(str, "print"))                         return CMD_PRINT;
     else                                                  return CMD_UNKNOWN;
 }
 
@@ -635,43 +641,6 @@ bool command_help(void)
             return false;
         }
         help_of(cmd);
-    }
-
-    return true;
-}
-
-bool does_file_have_todo_extension(char *path)
-{
-    char *point = strrchr(path, '.');
-    return (point++ && streq(point, TODO_FILE_EXTENSION));
-}
-
-bool is_valid_todo_path(char *path)
-{
-    if (!path) return false;
-    if (!does_file_exist(path)) return false;
-    if (is_directory(path)) return false;
-    if (!does_file_have_todo_extension(path)) return false; 
-    return true;
-}
-
-bool check_is_valid_todo_path_and_report_error(char *path)
-{
-    if (!path) return false;
-
-    if (!does_file_exist(path)) {
-        printf("ERROR: could not stat file at `%s`: %s\n", path, strerror(errno));
-        return false;
-    }
-
-    if (is_directory(path)) {
-        printf("ERROR: `%s` is a directory, not a file\n", path);
-        return false;
-    }
-
-    if (!does_file_have_todo_extension(path)) {
-        printf("ERROR: file `%s` has not extension `%s`\n", path, TODO_FILE_EXTENSION);
-        return false; 
     }
 
     return true;
@@ -752,11 +721,82 @@ bool print_all_tags_from_todo_path(void)
 {
     AoS tags = {0};
     if (!get_all_tags(&tags)) return false;
-    for (size_t i = 0; i < tags.count; i++) {
-        char *tag = tags.items[i];
-        printf("%zu. %s\n", i, tag);
-        free(tag);
+    da_foreach (tags, char *, tag) {
+        printf("%s\n", *tag);
+        free(*tag);
     }
+    return true;
+}
+
+bool command_print(void)
+{
+    bool flag_error = false;
+    for (size_t i = 0; i < flags.count; i++) {
+        char *flag = flags.items[i];
+        printf("ERROR: unknown flag `%s` for command print\n", flag);
+        flag_error = true;
+    }
+    if (flag_error) {
+        printf("FLAGS: %s\n", flags_of(CMD_PRINT));
+        return false;
+    }
+
+    if (args.count != 1) {
+        printf("ERROR: too many arguments for command print\n");
+        help_of(CMD_PRINT);
+        return false;
+    }
+
+    char *info = args.items[0];
+    if (streq(info, "tags")) {
+        if(!print_all_tags_from_todo_path()) return false;
+    } else if (streq(info, "paths")) {
+        da_foreach (paths, Path, p) printf("%s -> %s\n", p->name, p->path);
+    } else {
+        printf("ERROR: unknown <info> '%s' for command print\n", info);
+        printf("NOTE: Available options:\n");
+        printf("NOTE: - tags         found in file %s\n", todo_path);
+        printf("NOTE: - paths        found in file %s\n", paths_path);
+        return false;
+    }
+
+    return true;
+}
+
+bool does_file_have_todo_extension(char *path)
+{
+    char *point = strrchr(path, '.');
+    return (point++ && streq(point, TODO_FILE_EXTENSION));
+}
+
+bool is_valid_todo_path(char *path)
+{
+    if (!path) return false;
+    if (!does_file_exist(path)) return false;
+    if (is_directory(path)) return false;
+    if (!does_file_have_todo_extension(path)) return false; 
+    return true;
+}
+
+bool check_is_valid_todo_path_and_report_error(char *path)
+{
+    if (!path) return false;
+
+    if (!does_file_exist(path)) {
+        printf("ERROR: could not stat file at `%s`: %s\n", path, strerror(errno));
+        return false;
+    }
+
+    if (is_directory(path)) {
+        printf("ERROR: `%s` is a directory, not a file\n", path);
+        return false;
+    }
+
+    if (!does_file_have_todo_extension(path)) {
+        printf("ERROR: file `%s` has not extension `%s`\n", path, TODO_FILE_EXTENSION);
+        return false; 
+    }
+
     return true;
 }
 
@@ -1395,7 +1435,7 @@ int main(int argc, char **argv)
 
     bool result = true;
 
-    static_assert(CMDS_COUNT == 8, "Switch all commands in main");
+    static_assert(CMDS_COUNT == 9, "Switch all commands in main");
     switch (command)
     {
         case CMD_SHOW:     result = command_show();     break;
@@ -1405,6 +1445,7 @@ int main(int argc, char **argv)
         case CMD_MODIFY:   result = command_modify();   break;
         case CMD_ADDPATH:  result = command_addpath();  break;
         case CMD_HELP:     result = command_help();     break;
+        case CMD_PRINT:    result = command_print();    break;
         case CMD_UNKNOWN: {
             printf("ERROR: unknown command `%s`\n", args.items[0]);
         } break;
