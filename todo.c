@@ -659,7 +659,7 @@ bool get_all_todos(Todos *todos)
                 todo_path_is_custom ? todo_path : "");
         return false;
     }
-    qsort(todos->items, todos->count, sizeof(todos->items[0]), compare_todos_descending_priority);
+    da_sort(todos, compare_todos_descending_priority);
     return true;
 }
 
@@ -721,9 +721,13 @@ bool print_all_tags_from_todo_path(void)
 {
     AoS tags = {0};
     if (!get_all_tags(&tags)) return false;
-    da_foreach (tags, char *, tag) {
-        printf("%s\n", *tag);
-        free(*tag);
+    if (da_is_empty(&tags)) {
+        printf("No tags found at `%s`\n", todo_path);
+    } else {
+        da_foreach (tags, tag) {
+            printf("%s\n", *tag);
+            free(*tag);
+        }
     }
     return true;
 }
@@ -751,7 +755,8 @@ bool command_print(void)
     if (streq(info, "tags")) {
         if(!print_all_tags_from_todo_path()) return false;
     } else if (streq(info, "paths")) {
-        da_foreach (paths, Path, p) printf("%s -> %s\n", p->name, p->path);
+        if (da_is_empty(&paths)) printf("No paths found at `%s`\n", paths_path);
+        else da_foreach (paths, p) printf("%s -> %s\n", p->name, p->path);
     } else {
         printf("ERROR: unknown <info> '%s' for command print\n", info);
         printf("NOTE: Available options:\n");
@@ -886,7 +891,7 @@ bool command_addpath(void)
     char *path = args.items[1];
 
     bool path_error = !check_is_valid_todo_path_and_report_error(path);
-    da_foreach (paths, Path, p) {
+    da_foreach (paths, p) {
         if (streq(p->name, name)) {
             printf("ERROR: redefinition of path `%s`\n", name);
             printf("NOTE: bound to `%s`\n", p->path);
@@ -1386,7 +1391,7 @@ bool setup(int argc, char **argv)
                     return false;
                 }
                 bool found = false;
-                da_foreach (paths, Path, p) {
+                da_foreach (paths, p) {
                     if (streq(path, p->name)) {
                         found = true;
                         todo_path = p->path;
@@ -1399,7 +1404,7 @@ bool setup(int argc, char **argv)
                         printf("NOTE: there aren't any paths registered at `%s`:\n", paths_path);
                     } else {
                         printf("NOTE: Here are the registered paths at `%s`:\n", paths_path);
-                        da_foreach (paths, Path, p) printf("- %s -> %s\n", p->name, p->path);
+                        da_foreach (paths, p) printf("- %s -> %s\n", p->name, p->path);
                     }
                     return false;
                 }
